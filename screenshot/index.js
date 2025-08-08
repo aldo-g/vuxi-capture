@@ -1,8 +1,9 @@
+// Enhanced screenshot/index.js
 const fs = require('fs-extra');
 const path = require('path');
-const { ScreenshotCapture } = require('./capture');
+const { EnhancedScreenshotCapture } = require('./enhanced-capture'); // New enhanced capture
 
-class ScreenshotService {
+class EnhancedScreenshotService {
   constructor(options = {}) {
     this.outputDir = options.outputDir || './data/screenshots';
     this.viewport = {
@@ -11,27 +12,38 @@ class ScreenshotService {
     };
     this.timeout = options.timeout || 30000;
     this.concurrent = options.concurrent || 4;
+    
+    // New interactive options
+    this.captureInteractive = options.captureInteractive !== false; // Default true
+    this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 5;
+    this.interactionDelay = options.interactionDelay || 1000;
   }
 
   async captureAll(urls) {
-    console.log('📸 Screenshot Service Starting...');
+    console.log('📸 Enhanced Screenshot Service Starting...');
     console.log(`📋 URLs to capture: ${urls.length}`);
     console.log(`📁 Output: ${this.outputDir}`);
     console.log(`📐 Viewport: ${this.viewport.width}x${this.viewport.height}`);
     console.log(`🔀 Concurrency: ${this.concurrent} screenshots at once`);
+    console.log(`🎯 Interactive capture: ${this.captureInteractive ? 'ENABLED' : 'disabled'}`);
+    if (this.captureInteractive) {
+      console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
+    }
     
     const startTime = Date.now();
     let screenshotCapture = null;
     
     try {
-      // Create the screenshots subdirectory inside the job directory
       const screenshotsDir = path.join(this.outputDir, 'screenshots');
       await fs.ensureDir(screenshotsDir);
       
-      screenshotCapture = new ScreenshotCapture(screenshotsDir, {
+      screenshotCapture = new EnhancedScreenshotCapture(screenshotsDir, {
         width: this.viewport.width,
         height: this.viewport.height,
-        timeout: this.timeout
+        timeout: this.timeout,
+        captureInteractive: this.captureInteractive,
+        maxScreenshotsPerPage: this.maxScreenshotsPerPage,
+        interactionDelay: this.interactionDelay
       });
       
       // Process URLs in batches for concurrency
@@ -51,7 +63,6 @@ class ScreenshotService {
         
         allResults.push(...batchResults);
         
-        // Progress update
         const completed = Math.min(i + batchSize, urls.length);
         console.log(`  ⚡ Batch completed in ${batchDuration.toFixed(2)}s`);
         console.log(`✅ Completed ${completed}/${urls.length} URLs`);
@@ -62,18 +73,28 @@ class ScreenshotService {
       const failed = allResults.filter(r => !r.success);
       const duration = (Date.now() - startTime) / 1000;
       
-      // Save metadata in the screenshots directory
+      // Count total screenshots
+      const totalScreenshots = successful.reduce((total, result) => {
+        return total + (Array.isArray(result.data) ? result.data.length : 1);
+      }, 0);
+      
+      // Enhanced metadata
       const metadata = {
         timestamp: new Date().toISOString(),
         duration_seconds: duration,
         total_urls: urls.length,
         successful_captures: successful.length,
         failed_captures: failed.length,
+        total_screenshots: totalScreenshots,
+        interactive_capture_enabled: this.captureInteractive,
         results: allResults,
         configuration: {
           viewport: this.viewport,
           timeout: this.timeout,
-          concurrent: this.concurrent
+          concurrent: this.concurrent,
+          captureInteractive: this.captureInteractive,
+          maxScreenshotsPerPage: this.maxScreenshotsPerPage,
+          interactionDelay: this.interactionDelay
         }
       };
       
@@ -81,12 +102,12 @@ class ScreenshotService {
       await fs.writeJson(metadataPath, metadata, { spaces: 2 });
       
       // Summary
-      console.log('\n🎉 Screenshot service completed');
-      console.log(`⚡ Speed: ${(successful.length / duration).toFixed(1)} screenshots/second`);
-      console.log(`🔀 Concurrency efficiency: ${this.concurrent}x parallel processing`);
+      console.log('\n🎉 Enhanced screenshot service completed');
+      console.log(`📸 Total screenshots: ${totalScreenshots} (avg ${(totalScreenshots / successful.length).toFixed(1)} per page)`);
+      console.log(`⚡ Speed: ${(totalScreenshots / duration).toFixed(1)} screenshots/second`);
       console.log(`⏱️  Duration: ${duration.toFixed(2)} seconds`);
-      console.log(`✅ Successful: ${successful.length}/${urls.length}`);
-      console.log(`❌ Failed: ${failed.length}/${urls.length}`);
+      console.log(`✅ Successful pages: ${successful.length}/${urls.length}`);
+      console.log(`❌ Failed pages: ${failed.length}/${urls.length}`);
       console.log(`📄 Metadata saved to: ${metadataPath}`);
       
       return {
@@ -97,6 +118,7 @@ class ScreenshotService {
           total: urls.length,
           successful: successful.length,
           failed: failed.length,
+          totalScreenshots: totalScreenshots,
           duration: duration
         },
         files: {
@@ -106,7 +128,7 @@ class ScreenshotService {
       };
       
     } catch (error) {
-      console.error('❌ Screenshot service failed:', error);
+      console.error('❌ Enhanced screenshot service failed:', error);
       return {
         success: false,
         error: error.message,
@@ -115,11 +137,10 @@ class ScreenshotService {
         stats: {}
       };
     } finally {
-      // CRITICAL: Always close the browser
       if (screenshotCapture) {
         try {
           await screenshotCapture.close();
-          console.log('🔒 Screenshot service cleanup completed');
+          console.log('🔒 Enhanced screenshot service cleanup completed');
         } catch (error) {
           console.error('❌ Error during screenshot service cleanup:', error);
         }
@@ -128,15 +149,12 @@ class ScreenshotService {
   }
 
   async processBatchConcurrent(urls, startIndex, screenshotCapture) {
-    // Create promises for concurrent screenshot capture
     const promises = urls.map((url, i) => 
       this.captureWithRetry(screenshotCapture, url, startIndex + i)
     );
     
-    // Process all screenshots in this batch concurrently
     const results = await Promise.allSettled(promises);
     
-    // Convert results to our expected format
     return results.map((result, i) => ({
       url: urls[i],
       success: result.status === 'fulfilled',
@@ -156,7 +174,6 @@ class ScreenshotService {
         console.log(`  ⚠️  [${index}] Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
         
         if (attempt < maxRetries) {
-          // Wait a bit before retry
           await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
       }
@@ -166,4 +183,4 @@ class ScreenshotService {
   }
 }
 
-module.exports = { ScreenshotService };
+module.exports = { EnhancedScreenshotService };
