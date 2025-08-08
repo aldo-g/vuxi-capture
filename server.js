@@ -11,15 +11,15 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Import services with error handling
-let URLDiscoveryService, ScreenshotService;
+let URLDiscoveryService, EnhancedScreenshotService;
 try {
   console.log('📦 Loading URL Discovery Service...');
   ({ URLDiscoveryService } = require('./url-discovery'));
   console.log('✅ URL Discovery Service loaded');
   
-  console.log('📦 Loading Screenshot Service...');
-  ({ ScreenshotService } = require('./screenshot'));
-  console.log('✅ Screenshot Service loaded');
+  console.log('📦 Loading Enhanced Screenshot Service...');
+  ({ EnhancedScreenshotService } = require('./screenshot'));
+  console.log('✅ Enhanced Screenshot Service loaded');
 } catch (error) {
   console.error('❌ Failed to load services:', error);
   console.error('Make sure the service files exist and export the correct classes');
@@ -60,7 +60,11 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     service: 'vuxi-capture-service',
-    version: '1.0.0',
+    version: '1.1.0', // Updated version for enhanced features
+    features: {
+      interactiveCapture: true,
+      multipleScreenshotsPerPage: true
+    },
     activeJobs: Array.from(jobs.values()).filter(j => 
       j.status === JOB_STATUS.RUNNING || 
       j.status === JOB_STATUS.URL_DISCOVERY || 
@@ -73,12 +77,21 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Vuxi Capture Service',
-    version: '1.0.0',
+    version: '1.1.0',
+    features: {
+      interactiveCapture: 'Captures tabs, expandable content, modals, and dropdowns',
+      multipleScreenshots: 'Takes multiple screenshots per page for interactive elements'
+    },
     endpoints: {
       health: '/health',
       createJob: 'POST /api/capture',
       getJob: 'GET /api/capture/:jobId',
       listJobs: 'GET /api/jobs'
+    },
+    newOptions: {
+      captureInteractive: 'Enable/disable interactive element capture (default: true)',
+      maxScreenshotsPerPage: 'Maximum screenshots per page (default: 5)',
+      interactionDelay: 'Delay between interactions in ms (default: 1000)'
     }
   });
 });
@@ -99,7 +112,7 @@ app.post('/api/capture', async (req, res) => {
     
     console.log(`📁 Job ${jobId.slice(0,8)} output directory: ${outputDir}`);
     
-    // Create job record
+    // Create job record with enhanced options
     const job = {
       id: jobId,
       baseUrl,
@@ -108,7 +121,11 @@ app.post('/api/capture', async (req, res) => {
         timeout: options.timeout || 8000,
         concurrency: options.concurrency || 3,
         fastMode: options.fastMode !== false,
-        outputDir
+        outputDir,
+        // New enhanced screenshot options
+        captureInteractive: options.captureInteractive !== false, // Default true
+        maxScreenshotsPerPage: options.maxScreenshotsPerPage || 5,
+        interactionDelay: options.interactionDelay || 1000
       },
       status: JOB_STATUS.PENDING,
       createdAt: new Date().toISOString(),
@@ -122,6 +139,13 @@ app.post('/api/capture', async (req, res) => {
     
     jobs.set(jobId, job);
     console.log(`✅ Job ${jobId.slice(0,8)} created for ${baseUrl}`);
+    
+    // Log enhanced features being used
+    if (job.options.captureInteractive) {
+      console.log(`🎯 Interactive capture ENABLED (max ${job.options.maxScreenshotsPerPage} screenshots per page)`);
+    } else {
+      console.log(`📸 Standard capture mode (1 screenshot per page)`);
+    }
     
     // Start processing asynchronously with better error handling
     setImmediate(() => {
@@ -162,6 +186,12 @@ app.get('/api/capture/:jobId', (req, res) => {
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     baseUrl: job.baseUrl,
+    options: {
+      captureInteractive: job.options.captureInteractive,
+      maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
+      maxPages: job.options.maxPages,
+      concurrency: job.options.concurrency
+    },
     ...(job.status === JOB_STATUS.COMPLETED && {
       results: job.results
     }),
@@ -178,7 +208,8 @@ app.get('/api/jobs', (req, res) => {
     status: job.status,
     baseUrl: job.baseUrl,
     createdAt: job.createdAt,
-    progress: job.progress
+    progress: job.progress,
+    interactiveCapture: job.options?.captureInteractive || false
   }));
   
   res.json(jobList);
@@ -262,21 +293,31 @@ async function processJob(jobId) {
       }
     });
     
-    // Phase 2: Screenshot Capture
-    console.log(`📸 Starting screenshot capture for ${urlResult.urls.length} URLs`);
+    // Phase 2: Enhanced Screenshot Capture
+    console.log(`📸 Starting enhanced screenshot capture for ${urlResult.urls.length} URLs`);
+    if (job.options.captureInteractive) {
+      console.log(`🎯 Interactive capture enabled - will capture tabs, expandable content, and modals`);
+    }
+    
     updateJobStatus(jobId, JOB_STATUS.SCREENSHOT_CAPTURE, {
       progress: {
         stage: 'screenshot_capture',
         percentage: 45,
-        message: 'Capturing screenshots...'
+        message: job.options.captureInteractive ? 
+          'Capturing screenshots with interactive elements...' : 
+          'Capturing screenshots...'
       }
     });
     
-    const screenshotService = new ScreenshotService({
+    const screenshotService = new EnhancedScreenshotService({
       outputDir: job.options.outputDir,
       concurrent: job.options.concurrency || 4,
       timeout: job.options.timeout || 30000,
-      viewport: { width: 1440, height: 900 }
+      viewport: { width: 1440, height: 900 },
+      // Enhanced options
+      captureInteractive: job.options.captureInteractive,
+      maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
+      interactionDelay: job.options.interactionDelay
     });
     
     const screenshotResult = await screenshotService.captureAll(urlResult.urls);
@@ -284,14 +325,15 @@ async function processJob(jobId) {
     console.log(`📸 Screenshot capture completed:`, {
       success: screenshotResult.success,
       successful: screenshotResult.successful?.length || 0,
-      failed: screenshotResult.failed?.length || 0
+      failed: screenshotResult.failed?.length || 0,
+      totalScreenshots: screenshotResult.stats?.totalScreenshots || 0
     });
     
     if (!screenshotResult.success && screenshotResult.successful.length === 0) {
       throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
     }
     
-    // Job completed successfully
+    // Job completed successfully with enhanced results
     const results = {
       urls: urlResult.urls,
       screenshots: screenshotResult.successful,
@@ -303,8 +345,19 @@ async function processJob(jobId) {
         urls: urlResult.files,
         screenshots: screenshotResult.files
       },
-      outputDir: job.options.outputDir
+      outputDir: job.options.outputDir,
+      // Enhanced statistics
+      enhancedCapture: {
+        interactiveEnabled: job.options.captureInteractive,
+        totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
+        averageScreenshotsPerPage: screenshotResult.stats?.totalScreenshots ? 
+          (screenshotResult.stats.totalScreenshots / screenshotResult.successful.length).toFixed(1) : '1.0'
+      }
     };
+    
+    const completionMessage = job.options.captureInteractive ? 
+      `Enhanced analysis complete! Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots (including interactive elements) from ${urlResult.urls.length} URLs` :
+      `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlResult.urls.length} URLs`;
     
     console.log(`✅ Job ${jobId.slice(0,8)} completed successfully`);
     updateJobStatus(jobId, JOB_STATUS.COMPLETED, {
@@ -312,7 +365,7 @@ async function processJob(jobId) {
       progress: {
         stage: 'completed',
         percentage: 100,
-        message: `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlResult.urls.length} URLs`
+        message: completionMessage
       }
     });
     
@@ -339,10 +392,11 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Capture Service running on port ${PORT}`);
+  console.log(`🚀 Enhanced Capture Service running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`📝 API docs: http://localhost:${PORT}/api/jobs`);
   console.log(`🏠 Root endpoint: http://localhost:${PORT}/`);
+  console.log(`🎯 New features: Interactive capture, multiple screenshots per page`);
 });
 
 module.exports = app;
