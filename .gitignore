@@ -108,3 +108,4 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+.compile-context/file_context.txt
