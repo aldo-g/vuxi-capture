@@ -18,7 +18,7 @@ try {
   console.log('✅ URL Discovery Service loaded');
   
   console.log('📦 Loading Enhanced Screenshot Service...');
-  ({ EnhancedScreenshotService } = require('./screenshot'));
+  ({ EnhancedScreenshotService } = require('./screenshot/enhanced-integration'));
   console.log('✅ Enhanced Screenshot Service loaded');
 } catch (error) {
   console.error('❌ Failed to load services:', error);
@@ -60,10 +60,13 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     service: 'vuxi-capture-service',
-    version: '1.1.0', // Updated version for enhanced features
+    version: '2.0.0', // Updated version for enhanced interactive features
     features: {
       interactiveCapture: true,
-      multipleScreenshotsPerPage: true
+      multipleScreenshotsPerPage: true,
+      systematicInteractionDiscovery: true,
+      changeDetection: true,
+      elementPrioritization: true
     },
     activeJobs: Array.from(jobs.values()).filter(j => 
       j.status === JOB_STATUS.RUNNING || 
@@ -76,11 +79,15 @@ app.get('/health', (req, res) => {
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    service: 'Vuxi Capture Service',
-    version: '1.1.0',
+    service: 'Vuxi Enhanced Capture Service',
+    version: '2.0.0',
+    description: 'Advanced web content capture with systematic interactive element discovery',
     features: {
-      interactiveCapture: 'Captures tabs, expandable content, modals, and dropdowns',
-      multipleScreenshots: 'Takes multiple screenshots per page for interactive elements'
+      interactiveCapture: 'Systematically discovers and interacts with tabs, accordions, expandable content',
+      multipleScreenshots: 'Takes multiple targeted screenshots per page based on content changes',
+      intelligentDiscovery: 'AI-powered element discovery using multiple detection strategies',
+      changeDetection: 'Only captures screenshots when content actually changes',
+      prioritization: 'Smart prioritization of interactive elements for optimal capture'
     },
     endpoints: {
       health: '/health',
@@ -88,10 +95,12 @@ app.get('/', (req, res) => {
       getJob: 'GET /api/capture/:jobId',
       listJobs: 'GET /api/jobs'
     },
-    newOptions: {
+    enhancedOptions: {
       captureInteractive: 'Enable/disable interactive element capture (default: true)',
-      maxScreenshotsPerPage: 'Maximum screenshots per page (default: 5)',
-      interactionDelay: 'Delay between interactions in ms (default: 1000)'
+      maxInteractions: 'Maximum interactive elements to process per page (default: 30)',
+      maxScreenshotsPerPage: 'Maximum screenshots per page (default: 15)',
+      interactionDelay: 'Delay between interactions in ms (default: 800)',
+      changeDetectionTimeout: 'Time to wait for content changes after interaction (default: 2000ms)'
     }
   });
 });
@@ -99,7 +108,7 @@ app.get('/', (req, res) => {
 // Create a new capture job
 app.post('/api/capture', async (req, res) => {
   try {
-    console.log('🚀 Creating new capture job:', req.body);
+    console.log('🚀 Creating new enhanced capture job:', req.body);
     
     const { baseUrl, options = {} } = req.body;
     
@@ -117,15 +126,25 @@ app.post('/api/capture', async (req, res) => {
       id: jobId,
       baseUrl,
       options: {
+        // EXISTING URL DISCOVERY OPTIONS
         maxPages: options.maxPages || 20,
         timeout: options.timeout || 8000,
         concurrency: options.concurrency || 3,
         fastMode: options.fastMode !== false,
         outputDir,
-        // New enhanced screenshot options
+        
+        // ENHANCED INTERACTIVE CAPTURE OPTIONS
         captureInteractive: options.captureInteractive !== false, // Default true
-        maxScreenshotsPerPage: options.maxScreenshotsPerPage || 5,
-        interactionDelay: options.interactionDelay || 1000
+        maxInteractions: options.maxInteractions || 30,
+        maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
+        interactionDelay: options.interactionDelay || 800,
+        changeDetectionTimeout: options.changeDetectionTimeout || 2000,
+        
+        // ADVANCED OPTIONS (optional)
+        enableHoverCapture: options.enableHoverCapture || false,
+        prioritizeNavigation: options.prioritizeNavigation !== false, // Default true
+        skipSocialElements: options.skipSocialElements !== false, // Default true
+        maxProcessingTime: options.maxProcessingTime || 120000 // 2 minutes max per page
       },
       status: JOB_STATUS.PENDING,
       createdAt: new Date().toISOString(),
@@ -142,7 +161,14 @@ app.post('/api/capture', async (req, res) => {
     
     // Log enhanced features being used
     if (job.options.captureInteractive) {
-      console.log(`🎯 Interactive capture ENABLED (max ${job.options.maxScreenshotsPerPage} screenshots per page)`);
+      console.log(`🎯 ENHANCED INTERACTIVE CAPTURE ENABLED:`);
+      console.log(`   • Max interactions per page: ${job.options.maxInteractions}`);
+      console.log(`   • Max screenshots per page: ${job.options.maxScreenshotsPerPage}`);
+      console.log(`   • Interaction delay: ${job.options.interactionDelay}ms`);
+      console.log(`   • Change detection timeout: ${job.options.changeDetectionTimeout}ms`);
+      if (job.options.enableHoverCapture) {
+        console.log(`   • Hover capture: ENABLED`);
+      }
     } else {
       console.log(`📸 Standard capture mode (1 screenshot per page)`);
     }
@@ -187,10 +213,17 @@ app.get('/api/capture/:jobId', (req, res) => {
     updatedAt: job.updatedAt,
     baseUrl: job.baseUrl,
     options: {
+      // Core options
       captureInteractive: job.options.captureInteractive,
+      maxInteractions: job.options.maxInteractions,
       maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
       maxPages: job.options.maxPages,
-      concurrency: job.options.concurrency
+      concurrency: job.options.concurrency,
+      
+      // Advanced options
+      enableHoverCapture: job.options.enableHoverCapture,
+      interactionDelay: job.options.interactionDelay,
+      changeDetectionTimeout: job.options.changeDetectionTimeout
     },
     ...(job.status === JOB_STATUS.COMPLETED && {
       results: job.results
@@ -209,7 +242,11 @@ app.get('/api/jobs', (req, res) => {
     baseUrl: job.baseUrl,
     createdAt: job.createdAt,
     progress: job.progress,
-    interactiveCapture: job.options?.captureInteractive || false
+    enhancedCapture: {
+      interactiveEnabled: job.options?.captureInteractive || false,
+      maxInteractions: job.options?.maxInteractions || 0,
+      maxScreenshots: job.options?.maxScreenshotsPerPage || 0
+    }
   }));
   
   res.json(jobList);
@@ -223,14 +260,14 @@ async function processJob(jobId) {
   const job = jobs.get(jobId);
   if (!job) throw new Error('Job not found');
   
-  console.log(`🚀 Starting job processing: ${jobId.slice(0,8)}`);
+  console.log(`🚀 Starting enhanced job processing: ${jobId.slice(0,8)}`);
   
   try {
     updateJobStatus(jobId, JOB_STATUS.RUNNING, {
       progress: {
         stage: 'starting',
         percentage: 5,
-        message: 'Starting analysis...'
+        message: 'Starting enhanced analysis...'
       }
     });
     
@@ -293,10 +330,15 @@ async function processJob(jobId) {
       }
     });
     
-    // Phase 2: Enhanced Screenshot Capture
-    console.log(`📸 Starting enhanced screenshot capture for ${urlResult.urls.length} URLs`);
+    // Phase 2: Enhanced Interactive Screenshot Capture
+    console.log(`📸 Starting ENHANCED interactive screenshot capture for ${urlResult.urls.length} URLs`);
     if (job.options.captureInteractive) {
-      console.log(`🎯 Interactive capture enabled - will capture tabs, expandable content, and modals`);
+      console.log(`🎯 INTERACTIVE CAPTURE ENABLED - will systematically discover and interact with:`);
+      console.log(`   • Tabs and navigation elements`);
+      console.log(`   • Expandable content (accordions, "show more" buttons)`);
+      console.log(`   • Modal triggers and overlay content`);
+      console.log(`   • Dropdown menus and hidden panels`);
+      console.log(`   • Interactive media elements`);
     }
     
     updateJobStatus(jobId, JOB_STATUS.SCREENSHOT_CAPTURE, {
@@ -304,8 +346,8 @@ async function processJob(jobId) {
         stage: 'screenshot_capture',
         percentage: 45,
         message: job.options.captureInteractive ? 
-          'Capturing screenshots with interactive elements...' : 
-          'Capturing screenshots...'
+          'Capturing screenshots with systematic interactive element discovery...' : 
+          'Capturing standard screenshots...'
       }
     });
     
@@ -314,19 +356,27 @@ async function processJob(jobId) {
       concurrent: job.options.concurrency || 4,
       timeout: job.options.timeout || 30000,
       viewport: { width: 1440, height: 900 },
-      // Enhanced options
-      captureInteractive: job.options.captureInteractive,
+      
+      // Enhanced interactive options
+      enableInteractiveCapture: job.options.captureInteractive,
+      maxInteractions: job.options.maxInteractions,
       maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
-      interactionDelay: job.options.interactionDelay
+      interactionDelay: job.options.interactionDelay,
+      changeDetectionTimeout: job.options.changeDetectionTimeout,
+      enableHoverCapture: job.options.enableHoverCapture,
+      prioritizeNavigation: job.options.prioritizeNavigation,
+      skipSocialElements: job.options.skipSocialElements,
+      maxProcessingTime: job.options.maxProcessingTime
     });
     
     const screenshotResult = await screenshotService.captureAll(urlResult.urls);
     
-    console.log(`📸 Screenshot capture completed:`, {
+    console.log(`📸 Enhanced screenshot capture completed:`, {
       success: screenshotResult.success,
       successful: screenshotResult.successful?.length || 0,
       failed: screenshotResult.failed?.length || 0,
-      totalScreenshots: screenshotResult.stats?.totalScreenshots || 0
+      totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
+      interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0
     });
     
     if (!screenshotResult.success && screenshotResult.successful.length === 0) {
@@ -346,20 +396,29 @@ async function processJob(jobId) {
         screenshots: screenshotResult.files
       },
       outputDir: job.options.outputDir,
+      
       // Enhanced statistics
       enhancedCapture: {
         interactiveEnabled: job.options.captureInteractive,
         totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
-        averageScreenshotsPerPage: screenshotResult.stats?.totalScreenshots ? 
-          (screenshotResult.stats.totalScreenshots / screenshotResult.successful.length).toFixed(1) : '1.0'
+        averageScreenshotsPerPage: screenshotResult.stats?.averageScreenshotsPerPage || '1.0',
+        interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0,
+        interactionSuccessRate: screenshotResult.stats?.interactivePagesFound > 0 ? 
+          (screenshotResult.stats.interactivePagesFound / screenshotResult.successful.length * 100).toFixed(1) + '%' : '0%'
       }
     };
     
     const completionMessage = job.options.captureInteractive ? 
-      `Enhanced analysis complete! Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots (including interactive elements) from ${urlResult.urls.length} URLs` :
+      `🎉 ENHANCED ANALYSIS COMPLETE! 
+      📸 Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots from ${urlResult.urls.length} URLs
+      🎯 Found interactive content on ${screenshotResult.stats?.interactivePagesFound || 0} pages
+      ⚡ Average ${screenshotResult.stats?.averageScreenshotsPerPage || '1.0'} screenshots per page
+      🔍 Successfully discovered and interacted with tabs, expandable content, and hidden elements` :
       `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlResult.urls.length} URLs`;
     
     console.log(`✅ Job ${jobId.slice(0,8)} completed successfully`);
+    console.log(`🎯 Interactive pages found: ${screenshotResult.stats?.interactivePagesFound || 0}/${screenshotResult.successful.length}`);
+    
     updateJobStatus(jobId, JOB_STATUS.COMPLETED, {
       results,
       progress: {
@@ -396,7 +455,12 @@ app.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`📝 API docs: http://localhost:${PORT}/api/jobs`);
   console.log(`🏠 Root endpoint: http://localhost:${PORT}/`);
-  console.log(`🎯 New features: Interactive capture, multiple screenshots per page`);
+  console.log(`🎯 NEW FEATURES:`);
+  console.log(`   • Systematic interactive element discovery`);
+  console.log(`   • Multiple screenshots per page`);
+  console.log(`   • Smart content change detection`);
+  console.log(`   • Prioritized interaction sequences`);
+  console.log(`   • Detailed capture analytics`);
 });
 
 module.exports = app;

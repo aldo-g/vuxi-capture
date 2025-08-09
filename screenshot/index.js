@@ -1,34 +1,83 @@
-// Enhanced screenshot/index.js
+// Updated screenshot/index.js - Enhanced Screenshot Service Integration
 const fs = require('fs-extra');
 const path = require('path');
-const { EnhancedScreenshotCapture } = require('./enhanced-capture'); // New enhanced capture
 
-class EnhancedScreenshotService {
+// Import the enhanced screenshot service
+const { EnhancedScreenshotService } = require('./enhanced-integration');
+
+// Keep the legacy ScreenshotCapture class as fallback (if needed)
+const { ScreenshotCapture } = require('./capture');
+
+/**
+ * Enhanced Screenshot Service - Drop-in replacement for the original ScreenshotService
+ * Provides backwards compatibility while adding advanced interactive capture capabilities
+ */
+class ScreenshotService {
   constructor(options = {}) {
-    this.outputDir = options.outputDir || './data/screenshots';
-    this.viewport = {
-      width: options.viewport?.width || 1440,
-      height: options.viewport?.height || 900
-    };
-    this.timeout = options.timeout || 30000;
-    this.concurrent = options.concurrent || 4;
+    console.log('📸 Initializing Enhanced Screenshot Service...');
     
-    // New interactive options
-    this.captureInteractive = options.captureInteractive !== false; // Default true
-    this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 5;
-    this.interactionDelay = options.interactionDelay || 1000;
+    // Determine if we should use enhanced features
+    const useEnhancedCapture = options.enableInteractiveCapture !== false;
+    
+    if (useEnhancedCapture) {
+      console.log('🎯 Enhanced interactive capture mode enabled');
+      // Return the enhanced service with all new features
+      return new EnhancedScreenshotService({
+        outputDir: options.outputDir || './data/screenshots',
+        viewport: options.viewport || { width: 1440, height: 900 },
+        timeout: options.timeout || 30000,
+        concurrent: options.concurrent || 4,
+        
+        // Enhanced interactive options
+        enableInteractiveCapture: true,
+        maxInteractions: options.maxInteractions || 30,
+        maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
+        interactionDelay: options.interactionDelay || 800,
+        changeDetectionTimeout: options.changeDetectionTimeout || 2000,
+        
+        // Advanced options
+        enableHoverCapture: options.enableHoverCapture || false,
+        prioritizeNavigation: options.prioritizeNavigation !== false,
+        skipSocialElements: options.skipSocialElements !== false,
+        maxProcessingTime: options.maxProcessingTime || 120000
+      });
+    } else {
+      console.log('📷 Standard screenshot mode (legacy compatibility)');
+      // Use legacy service for backwards compatibility
+      this.outputDir = options.outputDir || './data/screenshots';
+      this.viewport = {
+        width: options.viewport?.width || 1440,
+        height: options.viewport?.height || 900
+      };
+      this.timeout = options.timeout || 30000;
+      this.concurrent = options.concurrent || 4;
+      this.useLegacyMode = true;
+    }
   }
 
+  /**
+   * Legacy compatibility method - automatically delegates to enhanced service
+   * unless specifically disabled
+   */
   async captureAll(urls) {
-    console.log('📸 Enhanced Screenshot Service Starting...');
+    if (this.useLegacyMode) {
+      console.log('📷 Using legacy screenshot capture mode...');
+      return this.legacyCaptureAll(urls);
+    }
+    
+    // This should never be reached since we return the EnhancedService instance
+    // But keeping for safety
+    console.log('⚠️  Warning: Legacy mode fallback triggered');
+    return this.legacyCaptureAll(urls);
+  }
+
+  /**
+   * Legacy capture implementation (fallback)
+   */
+  async legacyCaptureAll(urls) {
+    console.log('📸 Legacy Screenshot Service Starting...');
     console.log(`📋 URLs to capture: ${urls.length}`);
     console.log(`📁 Output: ${this.outputDir}`);
-    console.log(`📐 Viewport: ${this.viewport.width}x${this.viewport.height}`);
-    console.log(`🔀 Concurrency: ${this.concurrent} screenshots at once`);
-    console.log(`🎯 Interactive capture: ${this.captureInteractive ? 'ENABLED' : 'disabled'}`);
-    if (this.captureInteractive) {
-      console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
-    }
     
     const startTime = Date.now();
     let screenshotCapture = null;
@@ -37,13 +86,10 @@ class EnhancedScreenshotService {
       const screenshotsDir = path.join(this.outputDir, 'screenshots');
       await fs.ensureDir(screenshotsDir);
       
-      screenshotCapture = new EnhancedScreenshotCapture(screenshotsDir, {
+      screenshotCapture = new ScreenshotCapture(screenshotsDir, {
         width: this.viewport.width,
         height: this.viewport.height,
-        timeout: this.timeout,
-        captureInteractive: this.captureInteractive,
-        maxScreenshotsPerPage: this.maxScreenshotsPerPage,
-        interactionDelay: this.interactionDelay
+        timeout: this.timeout
       });
       
       // Process URLs in batches for concurrency
@@ -51,20 +97,14 @@ class EnhancedScreenshotService {
       const batchSize = this.concurrent;
       
       for (let i = 0; i < urls.length; i += batchSize) {
-        const batchNum = Math.floor(i/batchSize) + 1;
-        const totalBatches = Math.ceil(urls.length/batchSize);
         const currentBatch = urls.slice(i, i + batchSize);
         
-        console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${currentBatch.length} URLs concurrently)`);
+        console.log(`\n📦 Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(urls.length/batchSize)} (${currentBatch.length} URLs)`);
         
-        const batchStartTime = Date.now();
         const batchResults = await this.processBatchConcurrent(currentBatch, i, screenshotCapture);
-        const batchDuration = (Date.now() - batchStartTime) / 1000;
-        
         allResults.push(...batchResults);
         
         const completed = Math.min(i + batchSize, urls.length);
-        console.log(`  ⚡ Batch completed in ${batchDuration.toFixed(2)}s`);
         console.log(`✅ Completed ${completed}/${urls.length} URLs`);
       }
       
@@ -73,42 +113,29 @@ class EnhancedScreenshotService {
       const failed = allResults.filter(r => !r.success);
       const duration = (Date.now() - startTime) / 1000;
       
-      // Count total screenshots
-      const totalScreenshots = successful.reduce((total, result) => {
-        return total + (Array.isArray(result.data) ? result.data.length : 1);
-      }, 0);
-      
-      // Enhanced metadata
       const metadata = {
         timestamp: new Date().toISOString(),
         duration_seconds: duration,
         total_urls: urls.length,
         successful_captures: successful.length,
         failed_captures: failed.length,
-        total_screenshots: totalScreenshots,
-        interactive_capture_enabled: this.captureInteractive,
+        total_screenshots: successful.length, // 1 per successful URL in legacy mode
+        interactive_capture_enabled: false,
         results: allResults,
         configuration: {
           viewport: this.viewport,
           timeout: this.timeout,
           concurrent: this.concurrent,
-          captureInteractive: this.captureInteractive,
-          maxScreenshotsPerPage: this.maxScreenshotsPerPage,
-          interactionDelay: this.interactionDelay
+          mode: 'legacy'
         }
       };
       
       const metadataPath = path.join(screenshotsDir, 'metadata.json');
       await fs.writeJson(metadataPath, metadata, { spaces: 2 });
       
-      // Summary
-      console.log('\n🎉 Enhanced screenshot service completed');
-      console.log(`📸 Total screenshots: ${totalScreenshots} (avg ${(totalScreenshots / successful.length).toFixed(1)} per page)`);
-      console.log(`⚡ Speed: ${(totalScreenshots / duration).toFixed(1)} screenshots/second`);
+      console.log('\n📸 Legacy screenshot service completed');
       console.log(`⏱️  Duration: ${duration.toFixed(2)} seconds`);
-      console.log(`✅ Successful pages: ${successful.length}/${urls.length}`);
-      console.log(`❌ Failed pages: ${failed.length}/${urls.length}`);
-      console.log(`📄 Metadata saved to: ${metadataPath}`);
+      console.log(`✅ Successful: ${successful.length}/${urls.length}`);
       
       return {
         success: failed.length === 0,
@@ -118,7 +145,7 @@ class EnhancedScreenshotService {
           total: urls.length,
           successful: successful.length,
           failed: failed.length,
-          totalScreenshots: totalScreenshots,
+          totalScreenshots: successful.length,
           duration: duration
         },
         files: {
@@ -128,7 +155,7 @@ class EnhancedScreenshotService {
       };
       
     } catch (error) {
-      console.error('❌ Enhanced screenshot service failed:', error);
+      console.error('❌ Legacy screenshot service failed:', error);
       return {
         success: false,
         error: error.message,
@@ -138,12 +165,7 @@ class EnhancedScreenshotService {
       };
     } finally {
       if (screenshotCapture) {
-        try {
-          await screenshotCapture.close();
-          console.log('🔒 Enhanced screenshot service cleanup completed');
-        } catch (error) {
-          console.error('❌ Error during screenshot service cleanup:', error);
-        }
+        await screenshotCapture.close();
       }
     }
   }
@@ -183,4 +205,47 @@ class EnhancedScreenshotService {
   }
 }
 
-module.exports = { EnhancedScreenshotService };
+/**
+ * Factory function to create the appropriate screenshot service
+ * This provides a clean API for different use cases
+ */
+function createScreenshotService(options = {}) {
+  return new ScreenshotService(options);
+}
+
+/**
+ * Enhanced Screenshot Service - Direct access to enhanced features
+ * Use this when you specifically want the enhanced interactive capture
+ */
+function createEnhancedScreenshotService(options = {}) {
+  return new EnhancedScreenshotService({
+    enableInteractiveCapture: true,
+    maxInteractions: 30,
+    maxScreenshotsPerPage: 15,
+    interactionDelay: 800,
+    ...options
+  });
+}
+
+/**
+ * Legacy Screenshot Service - Direct access to legacy features
+ * Use this when you specifically want the old behavior
+ */
+function createLegacyScreenshotService(options = {}) {
+  return new ScreenshotService({
+    enableInteractiveCapture: false,
+    ...options
+  });
+}
+
+// Export the main service class and factory functions
+module.exports = { 
+  ScreenshotService,
+  EnhancedScreenshotService,
+  createScreenshotService,
+  createEnhancedScreenshotService,
+  createLegacyScreenshotService
+};
+
+// Export legacy classes for backwards compatibility
+module.exports.ScreenshotCapture = ScreenshotCapture;
