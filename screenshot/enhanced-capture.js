@@ -1,4 +1,4 @@
-// screenshot/enhanced-capture.js
+// screenshot/enhanced-capture.js - GENERIC VERSION
 const { chromium } = require('playwright');
 const fs = require('fs-extra');
 const path = require('path');
@@ -19,16 +19,10 @@ class EnhancedScreenshotCapture {
       height: options.height || 900
     };
     this.timeout = options.timeout || 45000;
-
     this.browser = null;
     this.enhancer = new ScreenshotEnhancer();
-
     this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 20;
     this.interactionDelay = options.interactionDelay || 800;
-
-    // arrival burst
-    this.arrivalBurstCount = 3;
-    this.arrivalBurstGapMs = 1000;
 
     this.screenshotsDir = path.join(outputDir, 'desktop');
     fs.ensureDirSync(this.screenshotsDir);
@@ -122,302 +116,230 @@ class EnhancedScreenshotCapture {
     await page.screenshot({ path: filepath, fullPage: true, type: 'png' });
   }
 
-  async tryClick(page, selector, labelForLog) {
-    const loc = page.locator(selector).first();
-    try { await loc.scrollIntoViewIfNeeded({ timeout: 2500 }); } catch {}
-    try {
-      await loc.click({ timeout: 3000 });
-      await SLEEP(this.interactionDelay);
-      return true;
-    } catch (e) {
-      console.log(`    ⚠️ Click failed on ${labelForLog || selector}: ${e.message}`);
+  async tryClick(page, selector, labelForLog, retries = 2) {
+    for (let attempt = 0; attempt < retries; attempt++) {
       try {
-        await loc.click({ timeout: 2000, force: true });
+        const element = page.locator(selector).first();
+        
+        // Different strategies for different attempt numbers
+        if (attempt === 0) {
+          // First attempt: Standard approach
+          await element.scrollIntoViewIfNeeded({ timeout: 1500 });
+          await element.waitFor({ state: 'visible', timeout: 1500 });
+          await element.click({ timeout: 1500 });
+        } else {
+          // Second attempt: Force click with JavaScript
+          await page.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            if (el) {
+              if (el.click) el.click();
+              else if (el.dispatchEvent) {
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              }
+            }
+          }, selector);
+        }
+        
         await SLEEP(this.interactionDelay);
         return true;
-      } catch {
-        return false;
+        
+      } catch (e) {
+        if (attempt < retries - 1) {
+          console.log(`    ⚠️ Attempt ${attempt + 1} failed, trying different approach...`);
+          await SLEEP(300);
+          continue;
+        }
       }
     }
+    
+    console.log(`    ❌ All click attempts failed on ${labelForLog || 'element'}`);
+    return false;
   }
 
-  // ---------- discovery in page ----------
-  async discoverExpandables(page) {
+  // ---------- COMPLETELY GENERIC component discovery ----------
+  async discoverInteractiveElements(page) {
     return await page.evaluate(() => {
-      const out = [];
+      const elements = [];
+      let elementCounter = 0;
 
       const isVisible = (el) => {
         if (!el || el.disabled) return false;
         const s = getComputedStyle(el);
         if (s.display === 'none' || s.visibility === 'hidden' || +s.opacity === 0) return false;
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+        return r.width > 5 && r.height > 5; // Must be reasonably sized
       };
 
-      const clsSig = (el) => Array.from(el.classList || []).sort().join('.');
-      const buildSel = (el) => {
-        if (!el) return '';
-        if (el.id) return `#${CSS.escape(el.id)}`;
-        const classes = Array.from(el.classList || []);
-        if (classes.length) return `${el.tagName.toLowerCase()}.${classes.map(CSS.escape).join('.')}`;
-        // fallback nth-of-type chain (short)
-        let segs = [], cur = el;
-        while (cur && segs.length < 4) {
-          let nth = 1, sib = cur;
-          while ((sib = sib.previousElementSibling) != null) if (sib.tagName === cur.tagName) nth++;
-          segs.unshift(`${cur.tagName.toLowerCase()}:nth-of-type(${nth})`);
-          cur = cur.parentElement;
-        }
-        return segs.join(' > ');
+      const createSelector = (el) => {
+        const id = 'auto_interact_' + (++elementCounter);
+        el.setAttribute('data-auto-id', id);
+        return `[data-auto-id="${id}"]`;
       };
 
-      const looksExpandText = (t) => {
-        t = (t || '').toLowerCase();
-        return /(show more|show less|expand|details|filters|read more|view more|\+\s*\d+\s*more|\+\s*more)/i.test(t);
+      const getText = (el) => {
+        const text = (el.innerText || el.textContent || '').trim();
+        return text.length > 100 ? text.substring(0, 97) + '...' : text;
       };
 
-      // details/summary
-      document.querySelectorAll('details summary').forEach(sm => {
-        const details = sm.closest('details');
-        if (details && isVisible(sm)) {
-          out.push({ selector: buildSel(sm), groupKey: `DETAILS|${clsSig(details)}`, reason: 'details' });
+      // 1. HIGHEST PRIORITY: Role-based interactive elements
+      document.querySelectorAll('[role="tab"], [role="button"], [role="tablist"] *').forEach(el => {
+        if (isVisible(el)) {
+          const priority = el.role === 'tab' ? 20 : (el.role === 'button' ? 15 : 12);
+          elements.push({
+            selector: createSelector(el),
+            text: getText(el),
+            type: el.role || 'role-element',
+            priority: priority
+          });
         }
       });
 
-      // obvious expand triggers
-      document.querySelectorAll('button, a, [role="button"]').forEach(el => {
+      // 2. NATIVE INTERACTIVE ELEMENTS: Buttons, links, form controls
+      document.querySelectorAll('button, a[href], select, input[type="checkbox"], input[type="radio"]').forEach(el => {
         if (!isVisible(el)) return;
-        const txt = (el.innerText || el.textContent || '').trim();
-        if (looksExpandText(txt)) {
-          out.push({ selector: buildSel(el), groupKey: `BTN|${clsSig(el)}`, reason: 'text-match' });
+        
+        const text = getText(el);
+        if (text.length < 1 || text.length > 200) return; // Skip empty or very long text
+        
+        elements.push({
+          selector: createSelector(el),
+          text: text,
+          type: el.tagName.toLowerCase(),
+          priority: 10
+        });
+      });
+
+      // 3. DISCLOSURE/EXPANDABLE ELEMENTS: Elements that can reveal content
+      document.querySelectorAll('details summary, [aria-expanded], [aria-controls], [data-toggle]').forEach(el => {
+        if (isVisible(el)) {
+          elements.push({
+            selector: createSelector(el),
+            text: getText(el),
+            type: 'disclosure',
+            priority: 14
+          });
         }
       });
 
-      // aria/accordion markers
-      document.querySelectorAll('[aria-expanded], [aria-controls], [data-accordion], .accordion, .collapse')
-        .forEach(el => {
-          if (!isVisible(el)) return;
-          out.push({ selector: buildSel(el), groupKey: `ARIA|${clsSig(el)}`, reason: 'aria' });
-        });
-
-      // project card “+N more” chips (click chip or the card)
-      document.querySelectorAll('article, .card, [class*="card"]').forEach(card => {
-        if (!isVisible(card)) return;
-        const txt = (card.innerText || card.textContent || '').toLowerCase();
-        if (/\+\s*\d+\s*more/.test(txt)) {
-          // prefer the chip/button inside the card if present
-          let trigger =
-            card.querySelector('button, a, [role="button"]') ||
-            card; // fall back to card itself
-          if (trigger && isVisible(trigger)) {
-            out.push({
-              selector: buildSel(trigger),
-              groupKey: `CARD|${clsSig(card)}`,
-              reason: '+N more chip'
-            });
-          }
+      // 4. ELEMENTS WITH CLICK HANDLERS: Any element with explicit interaction
+      document.querySelectorAll('[onclick], [data-action], [data-click], [data-target]').forEach(el => {
+        if (!isVisible(el)) return;
+        const text = getText(el);
+        if (text && text.length > 1 && text.length < 150) {
+          elements.push({
+            selector: createSelector(el),
+            text: text,
+            type: 'clickable',
+            priority: 8
+          });
         }
       });
 
-      // filter toggle near “Featured Projects”
-      const filterBtn = Array.from(document.querySelectorAll('button, [role="button"], a'))
-        .find(b => isVisible(b) && /(filter|filters)/i.test((b.innerText || b.textContent || '').trim()));
-      if (filterBtn) {
-        out.push({
-          selector: buildSel(filterBtn),
-          groupKey: `FILTERBTN|${clsSig(filterBtn)}`,
-          reason: 'filters button'
+      // 5. DROPDOWN/MENU TRIGGERS
+      document.querySelectorAll('[aria-haspopup], [data-dropdown], [data-menu]').forEach(el => {
+        if (isVisible(el)) {
+          elements.push({
+            selector: createSelector(el),
+            text: getText(el),
+            type: 'dropdown',
+            priority: 12
+          });
+        }
+      });
+
+      // 6. ELEMENTS IN LIKELY NAVIGATION/CONTROL AREAS (based on position and size)
+      document.querySelectorAll('*').forEach(el => {
+        if (!isVisible(el)) return;
+        if (el.tagName === 'BUTTON' || el.tagName === 'A') return; // Already covered above
+        
+        const rect = el.getBoundingClientRect();
+        const text = getText(el);
+        
+        // Look for small, positioned elements that might be controls
+        if (text && text.length > 1 && text.length < 50 && 
+            rect.width < 300 && rect.height < 100 && 
+            (el.style.cursor === 'pointer' || window.getComputedStyle(el).cursor === 'pointer')) {
+          
+          elements.push({
+            selector: createSelector(el),
+            text: text,
+            type: 'cursor-pointer',
+            priority: 6
+          });
+        }
+      });      // Sort by priority (higher first) and deduplicate by element reference
+      const seen = new Set();
+      return elements
+        .sort((a, b) => b.priority - a.priority)
+        .filter(el => {
+          // Use the selector as deduplication key since each element gets unique selector
+          if (seen.has(el.selector)) return false;
+          seen.add(el.selector);
+          return true;
+        })
+        .slice(0, 15); // Limit to top 15 most promising elements
+    });
+  }
+
+  // ---------- Generic interaction handler ----------
+  async handleInteractiveElements(page, baseFilename, results) {
+    const elements = await this.discoverInteractiveElements(page);
+    
+    if (!elements.length) {
+      console.log('  🔎 No interactive elements discovered.');
+      return;
+    }
+
+    console.log(`  🎯 Found ${elements.length} interactive elements to try`);
+    
+    let successCount = 0;
+    let attemptCount = 0;
+    const maxSuccessful = 3; // Reduce to focus on key interactions
+    const maxAttempts = Math.min(elements.length, 8); // Try fewer elements total
+
+    for (const element of elements) {
+      if (successCount >= maxSuccessful || attemptCount >= maxAttempts) break;
+      if (results.length >= this.maxScreenshotsPerPage) break;
+      
+      attemptCount++;
+      console.log(`  🔄 Trying ${element.type}: "${element.text.substring(0, 40)}..." (${attemptCount}/${maxAttempts})`);
+      
+      const clicked = await this.tryClick(page, element.selector, `${element.type}: ${element.text.substring(0, 30)}`);
+      
+      if (clicked) {
+        await SLEEP(600); // Wait for any animations/content loading
+        
+        const safeName = element.type.replace(/[^a-z0-9]/gi, '');
+        const name = baseFilename.replace('.png', `_interact-${successCount + 1}-${safeName}.png`);
+        console.log(`    📷 Capturing interaction result -> ${name}`);
+        
+        await this.capture(page, path.join(this.screenshotsDir, name));
+        results.push({
+          filename: name,
+          path: `desktop/${name}`,
+          type: `interaction-${element.type}`,
+          interaction: `${element.type}: ${element.text.substring(0, 50)}`,
+          timestamp: new Date().toISOString(),
+          viewport: this.viewport
         });
+        
+        successCount++;
+        
+        // Try to reset state for next interaction
+        try {
+          await page.keyboard.press('Escape');
+          await SLEEP(200);
+          // Click somewhere neutral to close any overlays
+          await page.mouse.click(50, 50);
+          await SLEEP(200);
+        } catch {}
       }
-
-      // dedupe by selector
-      const uniq = new Map();
-      for (const x of out) if (!uniq.has(x.selector)) uniq.set(x.selector, x);
-      return Array.from(uniq.values());
-    });
+    }
+    
+    console.log(`  ✅ Successfully captured ${successCount} interactions from ${attemptCount} attempts`);
   }
 
-  async discoverTabTargets(page) {
-    // Try role=tablist first
-    const tablists = await page.evaluate(() => {
-      const lists = [];
-
-      const isVisible = (el) => {
-        if (!el || el.disabled) return false;
-        const s = getComputedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || +s.opacity === 0) return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-      };
-
-      const sel = (el) => {
-        if (el.id) return `#${CSS.escape(el.id)}`;
-        const classes = Array.from(el.classList || []);
-        if (classes.length) return `${el.tagName.toLowerCase()}.${classes.map(CSS.escape).join('.')}`;
-        return el.tagName.toLowerCase();
-      };
-
-      // ARIA tablist
-      document.querySelectorAll('[role="tablist"]').forEach(list => {
-        if (!isVisible(list)) return;
-        const tabs = Array.from(list.querySelectorAll('[role="tab"], button, [aria-selected]'))
-          .filter(isVisible)
-          .map(el => ({ selector: sel(el), text: (el.innerText || el.textContent || '').trim() }))
-          .filter(t => t.text);
-        if (tabs.length > 1) lists.push({ container: sel(list), tabs });
-      });
-
-      return lists;
-    });
-
-    if (tablists.length) {
-      // flatten into simple targets
-      return tablists.flatMap(tl => tl.tabs);
-    }
-
-    // Heuristic for “Projects / Experience” pair near the header
-    const explicit = await page.evaluate(() => {
-      const out = [];
-      const isVisible = (el) => {
-        if (!el || el.disabled) return false;
-        const s = getComputedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || +s.opacity === 0) return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-      };
-      const sel = (el) => {
-        if (el.id) return `#${CSS.escape(el.id)}`;
-        const classes = Array.from(el.classList || []);
-        if (classes.length) return `${el.tagName.toLowerCase()}.${classes.map(CSS.escape).join('.')}`;
-        return el.tagName.toLowerCase();
-      };
-      const labels = ['Projects', 'Experience'];
-      labels.forEach(label => {
-        const el = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-          .find(b => isVisible(b) && (b.innerText || b.textContent || '').trim().toLowerCase() === label.toLowerCase());
-        if (el) out.push({ selector: sel(el), text: label });
-      });
-      return out;
-    });
-
-    return explicit;
-  }
-
-  // ---------- flows ----------
-  async captureArrivalBurst(page, baseFilename, results) {
-    const basePath = path.join(this.screenshotsDir, baseFilename);
-    console.log(`    📸 Baseline initial -> ${baseFilename}`);
-    await this.capture(page, basePath);
-    results.push({
-      filename: baseFilename,
-      path: `desktop/${baseFilename}`,
-      type: 'initial',
-      timestamp: new Date().toISOString(),
-      viewport: this.viewport
-    });
-
-    for (let i = 1; i <= this.arrivalBurstCount; i++) {
-      await SLEEP(this.arrivalBurstGapMs);
-      const name = baseFilename.replace('.png', `_arrival-${i}.png`);
-      console.log(`    📸 Arrival shot #${i} -> ${name}`);
-      await this.capture(page, path.join(this.screenshotsDir, name));
-      results.push({
-        filename: name,
-        path: `desktop/${name}`,
-        type: 'arrival',
-        timestamp: new Date().toISOString(),
-        viewport: this.viewport
-      });
-    }
-  }
-
-  async handleExpandables(page, baseFilename, results) {
-    const items = await this.discoverExpandables(page);
-    if (!items.length) {
-      console.log('  🔎 No expandables found.');
-      return;
-    }
-
-    // group by class signature (groupKey) to avoid clicking all identical cards
-    const groups = new Map();
-    for (const it of items) {
-      if (!groups.has(it.groupKey)) groups.set(it.groupKey, []);
-      groups.get(it.groupKey).push(it);
-    }
-
-    console.log(`  🔍 Expandable groups found: ${groups.size}`);
-
-    let shot = 0;
-    for (const [, list] of groups.entries()) {
-      const first = list[0];
-      const ok = await this.tryClick(page, first.selector, `expand[${first.reason}]`);
-      if (!ok) continue;
-
-      // if a dialog/modal appears, give it a moment
-      await SLEEP(600);
-
-      const name = baseFilename.replace('.png', `_expand-${++shot}.png`);
-      console.log(`    📷 Capturing expanded -> ${name}`);
-      await this.capture(page, path.join(this.screenshotsDir, name));
-      results.push({
-        filename: name,
-        path: `desktop/${name}`,
-        type: 'expandable',
-        timestamp: new Date().toISOString(),
-        viewport: this.viewport
-      });
-
-      // if a modal popped up, attempt to close it so we can continue (Esc)
-      try { await page.keyboard.press('Escape'); await SLEEP(200); } catch {}
-
-      if (results.length >= this.maxScreenshotsPerPage) return;
-    }
-  }
-
-  async handleTabs(page, baseFilename, results) {
-    const tabs = await this.discoverTabTargets(page);
-    if (!tabs.length) {
-      console.log('  🔎 No tab targets found.');
-      return;
-    }
-
-    // click each tab once; prefer Experience then Projects so we capture both states
-    const priority = (t) => {
-      const txt = (t.text || '').toLowerCase();
-      if (txt.includes('experience')) return 0;
-      if (txt.includes('projects')) return 1;
-      return 2;
-    };
-    tabs.sort((a, b) => priority(a) - priority(b));
-
-    let shot = 0;
-    const touched = new Set(); // avoid duplicate same-caption clicks
-    for (const tb of tabs) {
-      const key = (tb.text || '').toLowerCase();
-      if (touched.has(key)) continue;
-      touched.add(key);
-
-      const ok = await this.tryClick(page, tb.selector, `tab "${tb.text}"`);
-      if (!ok) continue;
-
-      await SLEEP(500);
-      const slug = (tb.text || 'tab').replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 40);
-      const name = baseFilename.replace('.png', `_tab-${++shot}-${slug}.png`);
-      console.log(`    📷 Capturing tab -> ${name}`);
-      await this.capture(page, path.join(this.screenshotsDir, name));
-      results.push({
-        filename: name,
-        path: `desktop/${name}`,
-        type: 'tab',
-        timestamp: new Date().toISOString(),
-        viewport: this.viewport
-      });
-
-      if (results.length >= this.maxScreenshotsPerPage) return;
-    }
-  }
-
-  // ---------- entry ----------
+  // ---------- Main entry point ----------
   async captureUrl(url, index) {
     const startTime = Date.now();
     let context = null;
@@ -427,8 +349,7 @@ class EnhancedScreenshotCapture {
 
       context = await this.browser.newContext({
         viewport: this.viewport,
-        userAgent:
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         reducedMotion: 'reduce',
         colorScheme: 'light'
       });
@@ -438,6 +359,7 @@ class EnhancedScreenshotCapture {
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.timeout });
       await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
       await SLEEP(900);
+      
       if (!response || response.status() >= 400) {
         throw new Error(`Failed to load page: HTTP ${response ? response.status() : 'unknown'}`);
       }
@@ -449,22 +371,27 @@ class EnhancedScreenshotCapture {
       const results = [];
       const baseFilename = createFilename(url, index);
 
-      // 1) Arrival burst (no interaction)
-      await this.captureArrivalBurst(page, baseFilename, results);
-      if (results.length >= this.maxScreenshotsPerPage) return results;
+      // 1) Capture baseline screenshot
+      console.log(`  📸 Capturing baseline screenshot...`);
+      const basePath = path.join(this.screenshotsDir, baseFilename);
+      await this.capture(page, basePath);
+      results.push({
+        filename: baseFilename,
+        path: `desktop/${baseFilename}`,
+        type: 'baseline',
+        timestamp: new Date().toISOString(),
+        viewport: this.viewport
+      });
 
-      // 2) Expand filters & one card per identical class
-      await this.handleExpandables(page, baseFilename, results);
-      if (results.length >= this.maxScreenshotsPerPage) return results;
+      // 2) Discover and interact with elements
+      await this.handleInteractiveElements(page, baseFilename, results);
 
-      // 3) Tabs (Projects / Experience)
-      await this.handleTabs(page, baseFilename, results);
-
-      // 4) De-dup
+      // 3) Deduplicate screenshots
       const deduped = await this.deDupeScreenshots(results);
 
-      console.log(`  ✅ Success in ${Date.now() - startTime}ms: ${deduped.length} screenshots (after de-dup)`);
+      console.log(`  ✅ Success in ${Date.now() - startTime}ms: ${deduped.length} unique screenshots`);
       return deduped;
+      
     } catch (error) {
       console.error(`  ❌ Error after ${Date.now() - startTime}ms: ${error.message}`);
       throw error;
