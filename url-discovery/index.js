@@ -29,16 +29,6 @@ class URLDiscoveryService {
   }
 
   async discover(startUrl) {
-    console.log('🔍 URL Discovery Service Starting...');
-    console.log(`🌐 Starting URL: ${startUrl}`);
-    console.log(`🎯 Max pages to crawl initially: ${this.maxPages}`);
-    console.log(`⚡ Fast mode: ${this.fastMode ? 'ENABLED' : 'disabled'}`);
-    console.log(`🔀 Concurrency: ${this.concurrency} pages at once`);
-    console.log(`⏰ Timeout: ${this.timeout}ms per page`);
-    console.log(`⏳ Wait time: ${this.waitTime}s`);
-    console.log(`📁 Output to be saved in: ${this.outputDir}`);
-    console.log(`📊 Max URLs total (hard limit): ${this.hierarchicalOptions.maxUrlsTotal}`);
-    
     const startTime = Date.now();
     
     try {
@@ -55,7 +45,6 @@ class URLDiscoveryService {
         excludePatterns: excludePatterns
       });
       
-      console.log('\n⚡ Starting CONCURRENT crawl...');
       const results = await crawler.crawl(startUrl); // results.urls contains deduplicated URLs from crawler
       
       let finalUrls = results.urls;

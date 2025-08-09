@@ -34,14 +34,23 @@ class InteractiveContentCapture {
 
       // Helper function to get element selector
       const getSelector = (element) => {
-        if (element.id) return `#${element.id}`;
+        if (element.id) return `#${CSS.escape(element.id)}`;
+        
         if (element.className && typeof element.className === 'string') {
-          const classes = element.className.trim().split(/\s+/).slice(0, 3);
+          const classes = element.className.trim().split(/\s+/)
+            .filter(cls => cls.length > 0 && /^[a-zA-Z_-]/.test(cls)) // Valid CSS class names only
+            .slice(0, 2); // Limit to 2 classes to avoid overly complex selectors
+          
           if (classes.length > 0) {
-            return `${element.tagName.toLowerCase()}.${classes.join('.')}`;
+            const escapedClasses = classes.map(cls => CSS.escape(cls)).join('.');
+            return `${element.tagName.toLowerCase()}.${escapedClasses}`;
           }
         }
-        return element.tagName.toLowerCase();
+        
+        // Fallback: use a unique data attribute
+        const uniqueId = 'interactive-' + Math.random().toString(36).substr(2, 9);
+        element.setAttribute('data-interactive-id', uniqueId);
+        return `[data-interactive-id="${uniqueId}"]`;
       };
 
       // Helper to check if element is interactive
@@ -60,179 +69,6 @@ class InteractiveContentCapture {
       const getTextContent = (element) => {
         return (element.textContent || element.innerText || '').trim().toLowerCase();
       };
-
-      // 1. EXPLICIT INTERACTIVE ELEMENTS
-      // Buttons and links
-      document.querySelectorAll('button, a, [role="button"], [role="tab"], [role="menuitem"]').forEach(el => {
-        if (!isInteractive(el) || seenElements.has(el)) return;
-        
-        const text = getTextContent(el);
-        const selector = getSelector(el);
-        
-        discovered.push({
-          element: el,
-          selector,
-          type: 'explicit',
-          subtype: el.tagName.toLowerCase(),
-          priority: this.getElementPriority(el, text),
-          text: text,
-          reason: 'explicit interactive element'
-        });
-        seenElements.add(el);
-      });
-
-      // 2. EXPANDABLE CONTENT PATTERNS
-      const expandablePatterns = [
-        /show\s*more/i, /read\s*more/i, /view\s*more/i, /see\s*more/i,
-        /expand/i, /details/i, /learn\s*more/i, /more\s*info/i,
-        /\+\s*more/i, /\d+\s*more/i, /additional/i, /full\s*description/i
-      ];
-
-      document.querySelectorAll('*').forEach(el => {
-        if (seenElements.has(el) || !isInteractive(el)) return;
-        
-        const text = getTextContent(el);
-        const isExpandable = expandablePatterns.some(pattern => pattern.test(text));
-        
-        if (isExpandable) {
-          discovered.push({
-            element: el,
-            selector: getSelector(el),
-            type: 'expandable',
-            subtype: 'text-pattern',
-            priority: 8, // High priority for expandable content
-            text: text,
-            reason: 'expandable text pattern'
-          });
-          seenElements.add(el);
-        }
-      });
-
-      // 3. STRUCTURAL INTERACTIVE ELEMENTS
-      // Details/Summary
-      document.querySelectorAll('details summary').forEach(el => {
-        if (seenElements.has(el)) return;
-        
-        discovered.push({
-          element: el,
-          selector: getSelector(el),
-          type: 'structural',
-          subtype: 'details-summary',
-          priority: 9,
-          text: getTextContent(el),
-          reason: 'details/summary element'
-        });
-        seenElements.add(el);
-      });
-
-      // 4. ARIA-BASED INTERACTIVE ELEMENTS
-      document.querySelectorAll('[aria-expanded], [aria-controls], [data-toggle], [data-target]').forEach(el => {
-        if (seenElements.has(el) || !isInteractive(el)) return;
-        
-        const ariaExpanded = el.getAttribute('aria-expanded');
-        const priority = ariaExpanded === 'false' ? 9 : 6;
-        
-        discovered.push({
-          element: el,
-          selector: getSelector(el),
-          type: 'aria',
-          subtype: 'aria-interactive',
-          priority: priority,
-          text: getTextContent(el),
-          reason: 'ARIA interactive attributes',
-          ariaState: ariaExpanded
-        });
-        seenElements.add(el);
-      });
-
-      // 5. TAB-LIKE ELEMENTS
-      const findTabGroups = () => {
-        const tabGroups = [];
-        
-        // Look for explicit tab lists
-        document.querySelectorAll('[role="tablist"]').forEach(tablist => {
-          const tabs = Array.from(tablist.querySelectorAll('[role="tab"], button, a')).filter(isInteractive);
-          if (tabs.length > 1) {
-            tabGroups.push({
-              container: tablist,
-              tabs: tabs,
-              type: 'explicit-tablist'
-            });
-          }
-        });
-
-        // Look for button groups that act like tabs
-        document.querySelectorAll('.tabs, .tab-container, [class*="tab"], .nav, .navigation').forEach(container => {
-          const buttons = Array.from(container.querySelectorAll('button, a')).filter(isInteractive);
-          if (buttons.length > 1) {
-            tabGroups.push({
-              container: container,
-              tabs: buttons,
-              type: 'button-group'
-            });
-          }
-        });
-
-        return tabGroups;
-      };
-
-      const tabGroups = findTabGroups();
-      tabGroups.forEach((group, groupIndex) => {
-        group.tabs.forEach((tab, tabIndex) => {
-          if (seenElements.has(tab)) return;
-          
-          discovered.push({
-            element: tab,
-            selector: getSelector(tab),
-            type: 'tab',
-            subtype: group.type,
-            priority: 10, // Highest priority for tabs
-            text: getTextContent(tab),
-            reason: `tab ${tabIndex + 1} in group ${groupIndex + 1}`,
-            tabGroup: groupIndex,
-            tabIndex: tabIndex
-          });
-          seenElements.add(tab);
-        });
-      });
-
-      // 6. HOVER-ACTIVATED ELEMENTS
-      document.querySelectorAll('[title], [data-tooltip], .tooltip-trigger, [onmouseover]').forEach(el => {
-        if (seenElements.has(el) || !isInteractive(el)) return;
-        
-        discovered.push({
-          element: el,
-          selector: getSelector(el),
-          type: 'hover',
-          subtype: 'tooltip-trigger',
-          priority: 3, // Lower priority
-          text: getTextContent(el),
-          reason: 'hover-activated element'
-        });
-        seenElements.add(el);
-      });
-
-      // 7. ELEMENTS WITH CLICK HANDLERS
-      document.querySelectorAll('*').forEach(el => {
-        if (seenElements.has(el) || !isInteractive(el)) return;
-        
-        const style = getComputedStyle(el);
-        const hasClickCursor = style.cursor === 'pointer';
-        const hasClickHandler = el.onclick !== null || el.getAttribute('onclick');
-        
-        if (hasClickCursor || hasClickHandler) {
-          discovered.push({
-            element: el,
-            selector: getSelector(el),
-            type: 'clickable',
-            subtype: hasClickHandler ? 'onclick-handler' : 'pointer-cursor',
-            priority: 5,
-            text: getTextContent(el),
-            reason: hasClickHandler ? 'has onclick handler' : 'pointer cursor'
-          });
-          seenElements.add(el);
-        }
-      });
 
       // Helper function to get element priority (higher = more important)
       function getElementPriority(element, text) {
@@ -258,6 +94,106 @@ class InteractiveContentCapture {
         return 5;
       }
 
+      // 1. EXPLICIT INTERACTIVE ELEMENTS
+      // Buttons and links
+      document.querySelectorAll('button, a, [role="button"], [role="tab"], [role="menuitem"]').forEach(el => {
+        if (!isInteractive(el) || seenElements.has(el)) return;
+        
+        const text = getTextContent(el);
+        const selector = getSelector(el);
+        
+        discovered.push({
+          selector,
+          type: 'explicit',
+          subtype: el.tagName.toLowerCase(),
+          priority: getElementPriority(el, text),
+          text: text,
+          reason: 'explicit interactive element'
+        });
+        seenElements.add(el);
+      });
+
+      // 2. EXPANDABLE ELEMENTS
+      // Details/summary, aria-expanded, data attributes
+      document.querySelectorAll('details summary, [aria-expanded], [data-toggle], [data-collapse]').forEach(el => {
+        if (!isInteractive(el) || seenElements.has(el)) return;
+        
+        const text = getTextContent(el);
+        const selector = getSelector(el);
+        
+        discovered.push({
+          selector,
+          type: 'expandable',
+          subtype: el.tagName.toLowerCase(),
+          priority: getElementPriority(el, text),
+          text: text,
+          reason: 'expandable content element'
+        });
+        seenElements.add(el);
+      });
+
+      // 3. FORM ELEMENTS
+      // Interactive form controls
+      document.querySelectorAll('select, input[type="checkbox"], input[type="radio"], input[type="range"]').forEach(el => {
+        if (!isInteractive(el) || seenElements.has(el)) return;
+        
+        const text = getTextContent(el.closest('label')) || getTextContent(el);
+        const selector = getSelector(el);
+        
+        discovered.push({
+          selector,
+          type: 'form',
+          subtype: el.tagName.toLowerCase(),
+          priority: 6,
+          text: text,
+          reason: 'interactive form element'
+        });
+        seenElements.add(el);
+      });
+
+      // 4. HOVER-ACTIVATED ELEMENTS
+      document.querySelectorAll('[title], [data-tooltip], .tooltip-trigger, [onmouseover]').forEach(el => {
+        if (seenElements.has(el) || !isInteractive(el)) return;
+        
+        discovered.push({
+          selector: getSelector(el),
+          type: 'hover',
+          subtype: 'tooltip-trigger',
+          priority: 3, // Lower priority
+          text: getTextContent(el),
+          reason: 'hover-activated element'
+        });
+        seenElements.add(el);
+      });
+
+      // 5. CLICKABLE ELEMENTS
+      // Elements with click handlers or pointer cursor
+      document.querySelectorAll('*').forEach(el => {
+        if (!isInteractive(el) || seenElements.has(el)) return;
+        
+        const style = getComputedStyle(el);
+        const hasClickHandler = el.onclick || el.getAttribute('onclick') || 
+                               el.hasAttribute('data-action') || el.hasAttribute('data-click');
+        const hasPointerCursor = style.cursor === 'pointer';
+        
+        if (hasClickHandler || hasPointerCursor) {
+          const text = getTextContent(el);
+          if (text.length < 3 || text.length > 200) return; // Skip very short or very long text
+          
+          const selector = getSelector(el);
+          
+          discovered.push({
+            selector,
+            type: 'clickable',
+            subtype: hasClickHandler ? 'onclick-handler' : 'pointer-cursor',
+            priority: 5,
+            text: text,
+            reason: hasClickHandler ? 'has onclick handler' : 'pointer cursor'
+          });
+          seenElements.add(el);
+        }
+      });
+
       // Sort by priority (highest first)
       return discovered.sort((a, b) => b.priority - a.priority);
     });
@@ -279,7 +215,7 @@ class InteractiveContentCapture {
     return elements;
   }
 
-  // Phase 2: Change Detection System
+  // Phase 2: Enhanced Change Detection System
   async detectContentChanges(beforeState) {
     await this.page.waitForTimeout(this.options.changeDetectionTimeout);
     
@@ -290,16 +226,24 @@ class InteractiveContentCapture {
         visibilityChanged: [],
         textChanged: false,
         layoutChanged: false,
-        newImages: []
+        newImages: [],
+        urlChanged: false,
+        activeElementChanged: false,
+        styleChanges: false
       };
 
-      // Check DOM structure changes
+      // 1. Check URL changes (for navigation)
+      if (window.location.href !== beforeState.url) {
+        changes.urlChanged = true;
+      }
+
+      // 2. Check DOM structure changes (more sensitive)
       const currentDomHash = document.documentElement.innerHTML.length;
-      if (currentDomHash !== beforeState.domHash) {
+      if (Math.abs(currentDomHash - beforeState.domHash) > 50) {  // More sensitive threshold
         changes.domChanged = true;
       }
 
-      // Check for new visible elements
+      // 3. Check for visibility changes (key for tabs)
       const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -309,24 +253,60 @@ class InteractiveContentCapture {
                style.opacity !== '0';
       });
 
-      if (visibleElements.length > beforeState.visibleElementCount) {
-        changes.newElements = visibleElements.slice(beforeState.visibleElementCount);
+      const visibilityChange = Math.abs(visibleElements.length - beforeState.visibleElementCount);
+      if (visibilityChange > 2) {  // More than 2 elements changed visibility
+        changes.visibilityChanged = true;
       }
 
-      // Check for new images
+      // 4. Check for active/selected element changes
+      const activeElement = document.activeElement;
+      const selectedElements = document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]');
+      if (selectedElements.length !== beforeState.selectedElementCount) {
+        changes.activeElementChanged = true;
+      }
+
+      // 5. Check for new images
       const images = document.querySelectorAll('img');
       if (images.length > beforeState.imageCount) {
         changes.newImages = Array.from(images).slice(beforeState.imageCount);
       }
 
-      // Simple text content change detection
+      // 6. More sensitive text content change detection
       const currentTextLength = document.body.textContent.length;
-      if (Math.abs(currentTextLength - beforeState.textLength) > 100) {
+      if (Math.abs(currentTextLength - beforeState.textLength) > 50) {  // Lower threshold
         changes.textChanged = true;
       }
 
+      // 7. Check for significant style changes (hidden/shown content)
+      const hiddenElements = document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]');
+      if (Math.abs(hiddenElements.length - beforeState.hiddenElementCount) > 1) {
+        changes.styleChanges = true;
+      }
+
+      // 8. Check for content area changes (common in SPAs)
+      const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
+      if (mainContent) {
+        const currentMainText = mainContent.textContent.length;
+        if (Math.abs(currentMainText - beforeState.mainContentLength) > 100) {
+          changes.textChanged = true;
+        }
+      }
+
       return changes;
-    }, beforeState);
+    }, {
+      ...beforeState,
+      url: await this.page.url(),
+      selectedElementCount: await this.page.evaluate(() => 
+        document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length
+      ),
+      hiddenElementCount: await this.page.evaluate(() => 
+        document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]').length
+      ),
+      mainContentLength: await this.page.evaluate(() => {
+        const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
+        return mainContent ? mainContent.textContent.length : 0;
+      })
+    });
   }
 
   // Phase 3: Smart Interaction Logic
@@ -343,11 +323,20 @@ class InteractiveContentCapture {
         }).length,
         imageCount: document.querySelectorAll('img').length,
         textLength: document.body.textContent.length,
-        scrollY: window.scrollY
+        scrollY: window.scrollY,
+        selectedElementCount: document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length,
+        hiddenElementCount: document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]').length,
+        mainContentLength: (() => {
+          const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
+          return mainContent ? mainContent.textContent.length : 0;
+        })(),
+        pageTextPreview: document.body.textContent.substring(0, 200) // First 200 chars for comparison
       }));
 
-      // Try to interact with the element
-      const interactionResult = await this.page.evaluate((selector, elementData) => {
+      console.log(`   📊 Before interaction - Text preview: "${beforeState.pageTextPreview.replace(/\s+/g, ' ').trim()}"`);
+
+      // Try to interact with the element - Enhanced with multiple strategies
+      const interactionResult = await this.page.evaluate(({ selector, elementType }) => {
         const element = document.querySelector(selector);
         if (!element) return { success: false, reason: 'Element not found' };
 
@@ -365,43 +354,176 @@ class InteractiveContentCapture {
         // Scroll element into view
         element.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-        // Choose interaction method based on element type
         try {
-          if (elementData.type === 'hover') {
+          if (elementType === 'hover') {
             // Create and dispatch mouseover event
             const event = new MouseEvent('mouseover', { bubbles: true });
             element.dispatchEvent(event);
+            return { success: true, method: 'hover' };
           } else {
-            // Standard click
+            // Multiple click strategies for better success rate
+            
+            // Strategy 1: Standard click
             element.click();
+            
+            // Strategy 2: If element text suggests it's a tab, try alternative approaches
+            const elementText = (element.textContent || '').toLowerCase();
+            if (elementText.includes('experience') || elementText.includes('tab')) {
+              
+              // Strategy 2a: Try clicking parent elements (common tab pattern)
+              let parent = element.parentElement;
+              while (parent && parent !== document.body) {
+                if (parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'tab' || 
+                    parent.classList.contains('tab') || parent.onclick) {
+                  parent.click();
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+              
+              // Strategy 2b: Try finding and clicking related tab elements
+              const tabButtons = document.querySelectorAll('[role="tab"], .tab, button[data-tab], [aria-controls]');
+              for (const tab of tabButtons) {
+                const tabText = (tab.textContent || '').toLowerCase();
+                if (tabText.includes('experience')) {
+                  tab.click();
+                  break;
+                }
+              }
+              
+              // Strategy 2c: Dispatch multiple event types
+              ['mousedown', 'mouseup', 'click'].forEach(eventType => {
+                const event = new MouseEvent(eventType, { 
+                  bubbles: true, 
+                  cancelable: true,
+                  view: window 
+                });
+                element.dispatchEvent(event);
+              });
+            }
+            
+            return { success: true, method: 'click_enhanced' };
           }
-          
-          return { success: true, method: elementData.type === 'hover' ? 'hover' : 'click' };
         } catch (error) {
           return { success: false, reason: error.message };
         }
-      }, elementData.selector, elementData);
+      }, { selector: elementData.selector, elementType: elementData.type });
 
       if (!interactionResult.success) {
         console.log(`   ❌ Interaction failed: ${interactionResult.reason}`);
         return null;
       }
 
-      // Wait for any animations or transitions
+      console.log(`   ✅ Click successful, waiting for initial response...`);
+      
+      // Wait for immediate response to the click
       await this.page.waitForTimeout(this.options.interactionDelay);
 
-      // Detect if content actually changed
-      const changes = await this.detectContentChanges(beforeState);
-      const hasSignificantChanges = changes.domChanged || 
-                                   changes.newElements.length > 0 || 
-                                   changes.newImages.length > 0 || 
-                                   changes.textChanged;
+      // Special handling for tab-like elements
+      const isTabElement = elementData.text.includes('experience') || 
+                         elementData.text.includes('projects') || 
+                         elementData.selector.includes('tab') ||
+                         elementData.text.includes('tab');
+
+      if (isTabElement) {
+        console.log(`   🎯 DETECTED TAB ELEMENT: "${elementData.text}"`);
+        console.log(`   ⏳ Waiting for tab content to fully load...`);
+        
+        // Wait for tab transition animations
+        await this.page.waitForTimeout(2000);
+        
+        // Wait for network requests to complete (common in tab switches)
+        try {
+          await this.page.waitForLoadState('networkidle', { timeout: 3000 });
+        } catch (e) {
+          console.log(`   ⚠️  Network idle timeout, continuing anyway...`);
+        }
+        
+        // Additional wait for dynamic content
+        await this.page.waitForTimeout(1000);
+      }
+
+      // Get page state after interaction and all waits
+      const afterState = await this.page.evaluate(() => ({
+        domHash: document.documentElement.innerHTML.length,
+        textLength: document.body.textContent.length,
+        pageTextPreview: document.body.textContent.substring(0, 300), // Increased to 300 chars
+        visibleElementCount: Array.from(document.querySelectorAll('*')).filter(el => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }).length,
+        selectedElementCount: document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length,
+        mainContentLength: (() => {
+          const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
+          return mainContent ? mainContent.textContent.length : 0;
+        })(),
+        // Check for specific content indicators
+        hasProjectsContent: document.body.textContent.toLowerCase().includes('featured projects'),
+        hasExperienceContent: document.body.textContent.toLowerCase().includes('professional experience') || 
+                             document.body.textContent.toLowerCase().includes('devops engineer'),
+        bodyTextHash: document.body.textContent.replace(/\s+/g, ' ').trim().substring(0, 500)
+      }));
+
+      console.log(`   📊 After interaction - Text preview: "${afterState.pageTextPreview.replace(/\s+/g, ' ').trim()}"`);
+      console.log(`   📊 Content comparison:`);
+      console.log(`     - DOM size change: ${beforeState.domHash} → ${afterState.domHash} (${afterState.domHash - beforeState.domHash})`);
+      console.log(`     - Text length change: ${beforeState.textLength} → ${afterState.textLength} (${afterState.textLength - beforeState.textLength})`);
+      console.log(`     - Visible elements: ${beforeState.visibleElementCount} → ${afterState.visibleElementCount} (${afterState.visibleElementCount - beforeState.visibleElementCount})`);
+      console.log(`     - Selected elements: ${beforeState.selectedElementCount} → ${afterState.selectedElementCount}`);
+      console.log(`     - Text content same: ${beforeState.pageTextPreview === afterState.pageTextPreview ? '❌ IDENTICAL' : '✅ CHANGED'}`);
+      console.log(`     - Body text hash same: ${beforeState.bodyTextHash === afterState.bodyTextHash ? '❌ IDENTICAL' : '✅ CHANGED'}`);
+      console.log(`     - Projects content: ${afterState.hasProjectsContent ? '✅ DETECTED' : '❌ NOT FOUND'}`);
+      console.log(`     - Experience content: ${afterState.hasExperienceContent ? '✅ DETECTED' : '❌ NOT FOUND'}`);
+
+      // Enhanced change detection based on content type
+      let contentTypeChanged = false;
+      if (elementData.text.includes('experience')) {
+        contentTypeChanged = afterState.hasExperienceContent && !beforeState.hasProjectsContent;
+        console.log(`     - Experience tab success: ${contentTypeChanged ? '✅ SUCCESS' : '❌ FAILED'}`);
+      } else if (elementData.text.includes('projects')) {
+        contentTypeChanged = afterState.hasProjectsContent && !beforeState.hasExperienceContent;
+        console.log(`     - Projects tab success: ${contentTypeChanged ? '✅ SUCCESS' : '❌ FAILED'}`);
+      }
 
       if (hasSignificantChanges) {
-        console.log(`   ✅ Content changed! Taking screenshot...`);
+        console.log(`   ✅ Content changed! Details:`, {
+          domChanged: changes.domChanged,
+          textChanged: changes.textChanged,
+          urlChanged: changes.urlChanged,
+          activeElementChanged: changes.activeElementChanged,
+          visibilityChanged: changes.visibilityChanged,
+          styleChanges: changes.styleChanges
+        });
         
-        // Take screenshot of the new state
-        const screenshotData = await this.takeScreenshot(`interaction_${index + 1}_${elementData.type}`);
+        // For important tab elements, wait even longer to ensure content is stable
+        if (elementData.text.includes('experience')) {
+          console.log(`   🎯 EXPERIENCE TAB DETECTED! Waiting extra time for content to stabilize...`);
+          await this.page.waitForTimeout(3000);
+          
+          // Check if experience content is actually visible
+          const experienceContentCheck = await this.page.evaluate(() => {
+            const bodyText = document.body.textContent.toLowerCase();
+            const hasExperienceKeywords = bodyText.includes('experience') && 
+                                        (bodyText.includes('work') || bodyText.includes('role') || 
+                                         bodyText.includes('company') || bodyText.includes('position') ||
+                                         bodyText.includes('job') || bodyText.includes('career'));
+            
+            // Also check for specific experience content structure
+            const experienceElements = document.querySelectorAll('[class*="experience"], [id*="experience"], [data-*="experience"]');
+            
+            return {
+              hasExperienceKeywords,
+              experienceElementsFound: experienceElements.length,
+              bodyTextSample: document.body.textContent.substring(0, 500)
+            };
+          });
+          
+          console.log(`   📋 Experience content check:`, experienceContentCheck);
+        }
+        
+        // Take screenshot of the new state with descriptive filename
+        const elementDescription = elementData.text ? elementData.text.substring(0, 15) : elementData.type;
+        const screenshotData = await this.takeScreenshot(`interaction_${index + 1}_${elementDescription.replace(/[^a-zA-Z0-9]/g, '_')}`);
         
         // Record interaction
         this.interactionHistory.set(elementData.selector, {

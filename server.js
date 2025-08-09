@@ -13,13 +13,9 @@ const PORT = process.env.PORT || 3001;
 // Import services with error handling
 let URLDiscoveryService, EnhancedScreenshotService;
 try {
-  console.log('📦 Loading URL Discovery Service...');
   ({ URLDiscoveryService } = require('./url-discovery'));
-  console.log('✅ URL Discovery Service loaded');
   
-  console.log('📦 Loading Enhanced Screenshot Service...');
   ({ EnhancedScreenshotService } = require('./screenshot/enhanced-integration'));
-  console.log('✅ Enhanced Screenshot Service loaded');
 } catch (error) {
   console.error('❌ Failed to load services:', error);
   console.error('Make sure the service files exist and export the correct classes');
@@ -108,7 +104,6 @@ app.get('/', (req, res) => {
 // Create a new capture job
 app.post('/api/capture', async (req, res) => {
   try {
-    console.log('🚀 Creating new enhanced capture job:', req.body);
     
     const { baseUrl, options = {} } = req.body;
     
@@ -118,9 +113,7 @@ app.post('/api/capture', async (req, res) => {
 
     const jobId = uuidv4();
     const outputDir = path.join(__dirname, 'data', `job_${jobId}`);
-    
-    console.log(`📁 Job ${jobId.slice(0,8)} output directory: ${outputDir}`);
-    
+        
     // Create job record with enhanced options
     const job = {
       id: jobId,
@@ -330,17 +323,6 @@ async function processJob(jobId) {
       }
     });
     
-    // Phase 2: Enhanced Interactive Screenshot Capture
-    console.log(`📸 Starting ENHANCED interactive screenshot capture for ${urlResult.urls.length} URLs`);
-    if (job.options.captureInteractive) {
-      console.log(`🎯 INTERACTIVE CAPTURE ENABLED - will systematically discover and interact with:`);
-      console.log(`   • Tabs and navigation elements`);
-      console.log(`   • Expandable content (accordions, "show more" buttons)`);
-      console.log(`   • Modal triggers and overlay content`);
-      console.log(`   • Dropdown menus and hidden panels`);
-      console.log(`   • Interactive media elements`);
-    }
-    
     updateJobStatus(jobId, JOB_STATUS.SCREENSHOT_CAPTURE, {
       progress: {
         stage: 'screenshot_capture',
@@ -452,15 +434,6 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Enhanced Capture Service running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`📝 API docs: http://localhost:${PORT}/api/jobs`);
-  console.log(`🏠 Root endpoint: http://localhost:${PORT}/`);
-  console.log(`🎯 NEW FEATURES:`);
-  console.log(`   • Systematic interactive element discovery`);
-  console.log(`   • Multiple screenshots per page`);
-  console.log(`   • Smart content change detection`);
-  console.log(`   • Prioritized interaction sequences`);
-  console.log(`   • Detailed capture analytics`);
 });
 
 module.exports = app;

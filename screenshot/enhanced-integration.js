@@ -125,13 +125,32 @@ class EnhancedScreenshotCapture {
         
         const screenshots = await interactiveCapture.captureInteractiveContent();
         
+        console.log(`  🔍 DEBUG: Received ${screenshots.length} screenshots from InteractiveContentCapture`);
+        
         // Save all screenshots from interactive capture
         for (let i = 0; i < screenshots.length; i++) {
           const screenshot = screenshots[i];
-          const filename = createFilename(url, index, i);
+          const filename = createEnhancedFilename(url, index, i);
           const filepath = path.join(this.screenshotsDir, filename);
           
-          await fs.writeFile(filepath, screenshot.buffer);
+          console.log(`  💾 DEBUG: Saving screenshot ${i + 1}/${screenshots.length}:`);
+          console.log(`    - Filename: ${filename}`);
+          console.log(`    - Filepath: ${filepath}`);
+          console.log(`    - Screenshot object keys:`, Object.keys(screenshot));
+          console.log(`    - Buffer size:`, screenshot.buffer ? screenshot.buffer.length : 'NO BUFFER');
+          
+          try {
+            if (screenshot.buffer && screenshot.buffer.length > 0) {
+              await fs.writeFile(filepath, screenshot.buffer);
+              console.log(`    ✅ Successfully saved ${filename} (${screenshot.buffer.length} bytes)`);
+            } else {
+              console.log(`    ❌ No valid buffer for ${filename}`);
+              continue;
+            }
+          } catch (saveError) {
+            console.error(`    ❌ Error saving ${filename}:`, saveError.message);
+            continue;
+          }
           
           captureResults.push({
             url: url,
@@ -143,6 +162,8 @@ class EnhancedScreenshotCapture {
             totalScreenshots: screenshots.length
           });
         }
+        
+        console.log(`  📊 DEBUG: Successfully saved ${captureResults.length} out of ${screenshots.length} screenshots`);
         
         // Generate capture report
         const report = interactiveCapture.getCaptureReport();
@@ -206,42 +227,42 @@ class EnhancedScreenshotCapture {
   }
 }
 
-// Enhanced Screenshot Service that handles multiple URLs
 class EnhancedScreenshotService {
   constructor(options = {}) {
     this.outputDir = options.outputDir || './data/screenshots';
-    this.viewport = {
-      width: options.viewport?.width || 1440,
-      height: options.viewport?.height || 900
-    };
-    this.timeout = options.timeout || 30000;
+    this.viewport = options.viewport || { width: 1440, height: 900 };
+    this.timeout = options.timeout || 45000;
     this.concurrent = options.concurrent || 4;
     
-    // Interactive options
+    // Enhanced interactive capture options
     this.enableInteractiveCapture = options.enableInteractiveCapture !== false;
     this.maxInteractions = options.maxInteractions || 30;
     this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 15;
     this.interactionDelay = options.interactionDelay || 800;
-  }
-
-  async captureAll(urls) {
-    console.log('📸 Enhanced Screenshot Service Starting...');
-    console.log(`📋 URLs to capture: ${urls.length}`);
-    console.log(`📁 Output: ${this.outputDir}`);
-    console.log(`📐 Viewport: ${this.viewport.width}x${this.viewport.height}`);
-    console.log(`🔀 Concurrency: ${this.concurrent} pages at once`);
-    console.log(`🎯 Interactive capture: ${this.enableInteractiveCapture ? 'ENABLED' : 'disabled'}`);
-    if (this.enableInteractiveCapture) {
-      console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
-      console.log(`⚡ Max interactions per page: ${this.maxInteractions}`);
-    }
+    this.changeDetectionTimeout = options.changeDetectionTimeout || 2000;
     
+    console.log('📸 Enhanced Screenshot Service initialized');
+    console.log(`🎯 Interactive capture: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
+  }
+  
+  async captureAll(urls) {
     const startTime = Date.now();
     let screenshotCapture = null;
     
     try {
-      await fs.ensureDir(this.outputDir);
+      console.log('📸 Enhanced Screenshot Service Starting...');
+      console.log(`📋 URLs to capture: ${urls.length}`);
+      console.log(`📁 Output: ${this.outputDir}`);
+      console.log(`📐 Viewport: ${this.viewport.width}x${this.viewport.height}`);
+      console.log(`🔀 Concurrency: ${this.concurrent} pages at once`);
+      console.log(`🎯 Interactive capture: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
       
+      if (this.enableInteractiveCapture) {
+        console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
+        console.log(`⚡ Max interactions per page: ${this.maxInteractions}`);
+      }
+      
+      // Create enhanced screenshot capture instance
       screenshotCapture = new EnhancedScreenshotCapture(this.outputDir, {
         width: this.viewport.width,
         height: this.viewport.height,
@@ -252,25 +273,19 @@ class EnhancedScreenshotService {
         interactionDelay: this.interactionDelay
       });
       
-      // Process URLs in batches
+      // Process URLs in batches for concurrency
       const allResults = [];
       const batchSize = this.concurrent;
       
       for (let i = 0; i < urls.length; i += batchSize) {
-        const batchNum = Math.floor(i/batchSize) + 1;
-        const totalBatches = Math.ceil(urls.length/batchSize);
         const currentBatch = urls.slice(i, i + batchSize);
         
-        console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${currentBatch.length} URLs concurrently)`);
+        console.log(`\n📦 Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(urls.length/batchSize)} (${currentBatch.length} URLs concurrently)`);
         
-        const batchStartTime = Date.now();
         const batchResults = await this.processBatchConcurrent(currentBatch, i, screenshotCapture);
-        const batchDuration = (Date.now() - batchStartTime) / 1000;
-        
         allResults.push(...batchResults);
         
         const completed = Math.min(i + batchSize, urls.length);
-        console.log(`  ⚡ Batch completed in ${batchDuration.toFixed(2)}s`);
         console.log(`✅ Completed ${completed}/${urls.length} URLs`);
       }
       
@@ -279,7 +294,7 @@ class EnhancedScreenshotService {
       const failed = allResults.filter(r => !r.success);
       const duration = (Date.now() - startTime) / 1000;
       
-      // Count total screenshots across all pages
+      // Calculate total screenshots
       const totalScreenshots = successful.reduce((total, result) => {
         return total + (Array.isArray(result.data) ? result.data.length : 1);
       }, 0);
@@ -334,7 +349,8 @@ class EnhancedScreenshotService {
           totalScreenshots: totalScreenshots,
           averageScreenshotsPerPage: parseFloat(metadata.average_screenshots_per_page),
           duration: duration,
-          interactivePagesFound: this.enableInteractiveCapture ? successful.filter(r => Array.isArray(r.data) && r.data.length > 1).length : 0
+          interactivePagesFound: this.enableInteractiveCapture ? 
+            successful.filter(r => Array.isArray(r.data) && r.data.length > 1).length : 0
         },
         files: {
           metadata: metadataPath,
@@ -353,12 +369,8 @@ class EnhancedScreenshotService {
       };
     } finally {
       if (screenshotCapture) {
-        try {
-          await screenshotCapture.close();
-          console.log('🔒 Enhanced screenshot service cleanup completed');
-        } catch (error) {
-          console.error('❌ Error during screenshot service cleanup:', error);
-        }
+        await screenshotCapture.close();
+        console.log('🔒 Enhanced screenshot service cleanup completed');
       }
     }
   }
@@ -398,8 +410,8 @@ class EnhancedScreenshotService {
   }
 }
 
-// Utility function to update existing createFilename function for multiple screenshots
-function createFilename(url, index, screenshotIndex = null) {
+// Enhanced createFilename function for multiple screenshots
+function createEnhancedFilename(url, index, screenshotIndex = null) {
   try {
     const urlObj = new URL(url);
     
