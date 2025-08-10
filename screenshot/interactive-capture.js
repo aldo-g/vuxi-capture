@@ -1,6 +1,7 @@
 // Enhanced Interactive Content Capture System
 // This system systematically discovers, interacts with, and captures all interactive content
 // Designed to work generically across all websites without hardcoded assumptions
+// NOW WITH ENHANCED CONTENT VALIDATION TO PREVENT UNLOADED CONTENT CAPTURE
 
 class InteractiveContentCapture {
   constructor(page, options = {}) {
@@ -28,6 +29,305 @@ class InteractiveContentCapture {
       visitedModals: new Set()
     };
   }
+
+  // ====== ENHANCED CONTENT VALIDATION METHODS ======
+
+  async validateContentLoaded() {
+    console.log('🔍 Validating content is fully loaded...');
+    
+    const validation = await this.page.evaluate(() => {
+      const issues = [];
+      
+      // 1. Check for unloaded images
+      const images = Array.from(document.querySelectorAll('img'));
+      const unloadedImages = images.filter(img => {
+        return !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0;
+      });
+      
+      if (unloadedImages.length > 0) {
+        issues.push({
+          type: 'unloaded_images',
+          count: unloadedImages.length,
+          selectors: unloadedImages.map(img => img.src || img.outerHTML.substring(0, 100)).slice(0, 5)
+        });
+      }
+      
+      // 2. Check for loading placeholders/skeletons
+      const loadingElements = document.querySelectorAll(
+        '[class*="loading"], [class*="skeleton"], [class*="placeholder"], ' +
+        '[class*="spinner"], [data-loading], .loading, .skeleton, .placeholder'
+      );
+      
+      if (loadingElements.length > 0) {
+        issues.push({
+          type: 'loading_placeholders',
+          count: loadingElements.length,
+          elements: Array.from(loadingElements).map(el => el.className || el.tagName).slice(0, 5)
+        });
+      }
+      
+      // 3. Check for empty content areas that should have content
+      const contentAreas = document.querySelectorAll(
+        'main, [role="main"], .content, .main-content, article, section'
+      );
+      
+      const emptyContentAreas = Array.from(contentAreas).filter(area => {
+        const text = area.textContent.trim();
+        const images = area.querySelectorAll('img').length;
+        const videos = area.querySelectorAll('video').length;
+        
+        // Consider it empty if it has very little content
+        return text.length < 50 && images === 0 && videos === 0;
+      });
+      
+      if (emptyContentAreas.length > 0) {
+        issues.push({
+          type: 'empty_content_areas',
+          count: emptyContentAreas.length
+        });
+      }
+      
+      // 4. Check for error messages or failed content
+      const errorElements = document.querySelectorAll(
+        '[class*="error"], [class*="failed"], [class*="404"], ' +
+        '.error, .failed, .not-found, [data-error]'
+      );
+      
+      if (errorElements.length > 0) {
+        issues.push({
+          type: 'error_elements',
+          count: errorElements.length,
+          messages: Array.from(errorElements).map(el => el.textContent.trim()).slice(0, 3)
+        });
+      }
+      
+      // 5. Check for lazy loading indicators
+      const lazyElements = document.querySelectorAll(
+        '[data-lazy], [loading="lazy"], [class*="lazy"]'
+      );
+      
+      if (lazyElements.length > 0) {
+        issues.push({
+          type: 'lazy_elements',
+          count: lazyElements.length
+        });
+      }
+      
+      return {
+        isValid: issues.length === 0,
+        issues: issues,
+        stats: {
+          totalImages: images.length,
+          loadedImages: images.length - unloadedImages.length,
+          contentAreas: contentAreas.length,
+          totalElements: document.querySelectorAll('*').length
+        }
+      };
+    });
+    
+    if (!validation.isValid) {
+      console.log('⚠️  Content validation issues found:', validation.issues);
+      
+      // Try to fix some issues
+      await this.attemptContentRecovery(validation.issues);
+      
+      // Re-validate after recovery attempt
+      const revalidation = await this.page.evaluate(() => {
+        const images = Array.from(document.querySelectorAll('img'));
+        const unloadedImages = images.filter(img => !img.complete || img.naturalWidth === 0);
+        return {
+          remainingIssues: unloadedImages.length,
+          totalImages: images.length
+        };
+      });
+      
+      console.log(`🔍 After recovery: ${revalidation.remainingIssues}/${revalidation.totalImages} images still unloaded`);
+    } else {
+      console.log('✅ Content validation passed');
+    }
+    
+    return validation;
+  }
+
+  async attemptContentRecovery(issues) {
+    console.log('🔧 Attempting content recovery...');
+    
+    for (const issue of issues) {
+      switch (issue.type) {
+        case 'unloaded_images':
+          console.log(`   🖼️  Attempting to reload ${issue.count} images...`);
+          await this.page.evaluate(() => {
+            const unloadedImages = Array.from(document.querySelectorAll('img')).filter(img => 
+              !img.complete || img.naturalWidth === 0
+            );
+            
+            unloadedImages.forEach(img => {
+              const src = img.src;
+              if (src) {
+                img.src = '';
+                setTimeout(() => img.src = src, 100);
+              }
+            });
+          });
+          
+          await this.page.waitForTimeout(2000);
+          await this.waitForImages();
+          break;
+          
+        case 'loading_placeholders':
+          console.log('   ⏳ Waiting longer for loading placeholders...');
+          await this.page.waitForTimeout(3000);
+          break;
+          
+        case 'lazy_elements':
+          console.log('   🔄 Re-triggering lazy loading...');
+          await this.triggerLazyLoading();
+          break;
+      }
+    }
+  }
+
+  async shouldTakeScreenshot() {
+    const contentQuality = await this.page.evaluate(() => {
+      // Check content quality metrics
+      const metrics = {
+        score: 100,
+        issues: []
+      };
+      
+      // 1. Check image loading ratio
+      const images = Array.from(document.querySelectorAll('img'));
+      const unloadedImages = images.filter(img => 
+        !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0
+      );
+      
+      const imageLoadRatio = images.length > 0 ? (images.length - unloadedImages.length) / images.length : 1;
+      
+      if (imageLoadRatio < 0.8 && images.length > 3) {
+        metrics.score -= 30;
+        metrics.issues.push(`${unloadedImages.length}/${images.length} images not loaded`);
+      }
+      
+      // 2. Check for loading states
+      const loadingElements = document.querySelectorAll(
+        '[class*="loading"], [class*="skeleton"], [class*="spinner"], ' +
+        '[data-loading="true"], .loading, .skeleton'
+      );
+      
+      if (loadingElements.length > 0) {
+        metrics.score -= 20;
+        metrics.issues.push(`${loadingElements.length} loading placeholders visible`);
+      }
+      
+      // 3. Check content density
+      const textContent = document.body.textContent.trim();
+      const contentDensity = textContent.length;
+      
+      if (contentDensity < 100) {
+        metrics.score -= 25;
+        metrics.issues.push('Low content density');
+      }
+      
+      // 4. Check for error states
+      const errorElements = document.querySelectorAll(
+        '[class*="error"], [class*="404"], [class*="failed"], .error, .not-found'
+      );
+      
+      if (errorElements.length > 0) {
+        metrics.score -= 40;
+        metrics.issues.push('Error elements detected');
+      }
+      
+      // 5. Check for blank/white screen
+      const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && 
+               style.display !== 'none' && 
+               style.visibility !== 'hidden';
+      });
+      
+      if (visibleElements.length < 10) {
+        metrics.score -= 50;
+        metrics.issues.push('Very few visible elements');
+      }
+      
+      return metrics;
+    });
+    
+    const shouldTake = contentQuality.score >= 70; // Threshold for acceptable content
+    
+    if (!shouldTake) {
+      console.log(`   ⚠️  Skipping screenshot - content quality score: ${contentQuality.score}/100`);
+      console.log(`   Issues: ${contentQuality.issues.join(', ')}`);
+    }
+    
+    return shouldTake;
+  }
+
+  // Enhanced version of waitForCompletePageLoad with validation
+  async waitForCompletePageLoadWithValidation() {
+    console.log('🔄 Ensuring complete page load with validation...');
+    
+    try {
+      // Run existing page load logic
+      await this.waitForCompletePageLoad();
+      
+      // Add content validation
+      const validation = await this.validateContentLoaded();
+      
+      // If content issues remain, decide whether to proceed or retry
+      if (!validation.isValid) {
+        const criticalIssues = validation.issues.filter(issue => 
+          issue.type === 'unloaded_images' || issue.type === 'empty_content_areas'
+        );
+        
+        if (criticalIssues.length > 0) {
+          console.log('⚠️  Critical content issues detected, but proceeding with capture...');
+          // You could choose to throw an error here instead: throw new Error('Critical content not loaded');
+        }
+      }
+      
+      console.log('✅ Page fully loaded and validated');
+      
+    } catch (error) {
+      console.log(`⚠️  Page load/validation timeout, continuing anyway: ${error.message}`);
+    }
+  }
+
+  // Enhanced takeScreenshot with quality check
+  async takeScreenshotWithQualityCheck(filename) {
+    try {
+      // Check if content is ready for screenshot
+      const shouldTake = await this.shouldTakeScreenshot();
+      
+      if (!shouldTake) {
+        console.log(`   ⏭️  Skipping screenshot: ${filename} - content not ready`);
+        return null;
+      }
+      
+      const screenshotBuffer = await this.page.screenshot({
+        fullPage: true,
+        type: 'png'
+      });
+
+      const screenshotData = {
+        filename: `${filename}.png`,
+        timestamp: new Date().toISOString(),
+        size: screenshotBuffer.length,
+        buffer: screenshotBuffer
+      };
+
+      this.screenshots.push(screenshotData);
+      console.log(`   📸 Screenshot saved: ${filename}.png`);
+      return screenshotData;
+    } catch (error) {
+      console.error(`Failed to take screenshot: ${error.message}`);
+      return null;
+    }
+  }
+
+  // ====== EXISTING METHODS (UPDATED TO USE NEW VALIDATION) ======
 
   // Phase 1: Comprehensive Element Discovery
   async discoverInteractiveElements() {
@@ -78,206 +378,156 @@ class InteractiveContentCapture {
       const shouldSkipElement = (element, text) => {
         if (!options.skipSocialElements) return false;
         
-        // Skip common social and tracking elements
         const socialPatterns = [
-          'share', 'tweet', 'facebook', 'linkedin', 'instagram', 'youtube',
-          'google+', 'pinterest', 'snapchat', 'tiktok', 'whatsapp',
-          'cookie', 'gdpr', 'privacy', 'analytics', 'tracking',
+          'facebook', 'twitter', 'instagram', 'linkedin', 'youtube',
+          'share', 'tweet', 'follow', 'subscribe', 'like', 'upvote',
           'advertisement', 'sponsored', 'promo'
         ];
         
-        const textLower = text.toLowerCase();
-        const classNames = (element.className || '').toLowerCase();
-        const id = (element.id || '').toLowerCase();
-        
+        const elementHtml = element.outerHTML.toLowerCase();
         return socialPatterns.some(pattern => 
-          textLower.includes(pattern) || classNames.includes(pattern) || id.includes(pattern)
+          text.includes(pattern) || elementHtml.includes(pattern)
         );
       };
 
-      // Helper function to get element priority (higher = more important)
-      function getElementPriority(element, text) {
-        // Navigation elements get highest priority
-        if (element.closest('nav, .nav, .navigation, .menu, header, .header')) return 10;
-        
-        // Tab-related elements (generic detection)
-        if (element.getAttribute('role') === 'tab') return 10;
-        if (element.getAttribute('role') === 'tabpanel') return 9;
-        if (element.classList.contains('tab') || element.getAttribute('data-tab')) return 9;
-        
-        // Expandable content indicators (generic)
-        const expandableKeywords = ['more', 'expand', 'show', 'toggle', 'collapse', 'accordion'];
-        if (expandableKeywords.some(keyword => text.includes(keyword))) return 8;
-        
-        // Structural elements
-        if (element.tagName === 'SUMMARY') return 9;
-        if (element.getAttribute('aria-expanded') === 'false') return 8;
-        
-        // Modal and overlay triggers
-        if (element.getAttribute('data-modal') || element.getAttribute('data-toggle') === 'modal') return 7;
-        
-        // Regular buttons and links
-        if (element.tagName === 'BUTTON') return 7;
-        if (element.tagName === 'A' && element.getAttribute('href') !== '#') return 6;
-        
-        // Form elements
-        if (['SELECT', 'INPUT', 'TEXTAREA'].includes(element.tagName)) return 6;
-        
-        // Everything else
-        return 5;
-      }
-
-      // 1. EXPLICIT INTERACTIVE ELEMENTS
-      // Buttons and links
-      document.querySelectorAll('button, a, [role="button"], [role="tab"], [role="menuitem"]').forEach(el => {
-        if (!isInteractive(el) || seenElements.has(el)) return;
-        
-        const text = getTextContent(el);
-        if (shouldSkipElement(el, text)) return;
-        
-        const selector = getSelector(el);
-        
-        discovered.push({
-          selector,
-          type: 'explicit',
-          subtype: el.tagName.toLowerCase(),
-          priority: getElementPriority(el, text),
-          text: text,
-          reason: 'explicit interactive element'
-        });
-        seenElements.add(el);
-      });
-
-      // 2. EXPANDABLE ELEMENTS
-      // Details/summary, aria-expanded, data attributes
-      document.querySelectorAll('details summary, [aria-expanded], [data-toggle], [data-collapse]').forEach(el => {
-        if (!isInteractive(el) || seenElements.has(el)) return;
-        
-        const text = getTextContent(el);
-        if (shouldSkipElement(el, text)) return;
-        
-        const selector = getSelector(el);
-        
-        discovered.push({
-          selector,
-          type: 'expandable',
-          subtype: el.tagName.toLowerCase(),
-          priority: getElementPriority(el, text),
-          text: text,
-          reason: 'expandable content element'
-        });
-        seenElements.add(el);
-      });
-
-      // 3. FORM ELEMENTS
-      // Interactive form controls
-      document.querySelectorAll('select, input[type="checkbox"], input[type="radio"], input[type="range"]').forEach(el => {
-        if (!isInteractive(el) || seenElements.has(el)) return;
-        
-        const text = getTextContent(el.closest('label')) || getTextContent(el);
-        if (shouldSkipElement(el, text)) return;
-        
-        const selector = getSelector(el);
-        
-        discovered.push({
-          selector,
-          type: 'form',
-          subtype: el.tagName.toLowerCase(),
-          priority: 6,
-          text: text,
-          reason: 'interactive form element'
-        });
-        seenElements.add(el);
-      });
-
-      // 4. HOVER-ACTIVATED ELEMENTS (if enabled)
-      if (options.enableHoverCapture) {
-        document.querySelectorAll('[title], [data-tooltip], .tooltip-trigger, [onmouseover]').forEach(el => {
-          if (seenElements.has(el) || !isInteractive(el)) return;
-          
-          const text = getTextContent(el);
-          if (shouldSkipElement(el, text)) return;
-          
-          discovered.push({
-            selector: getSelector(el),
-            type: 'hover',
-            subtype: 'tooltip-trigger',
-            priority: 3, // Lower priority
-            text: text,
-            reason: 'hover-activated element'
-          });
-          seenElements.add(el);
-        });
-      }
-
-      // 5. CLICKABLE ELEMENTS
-      // Elements with click handlers or pointer cursor
-      document.querySelectorAll('*').forEach(el => {
-        if (!isInteractive(el) || seenElements.has(el)) return;
-        
-        const style = getComputedStyle(el);
-        const hasClickHandler = el.onclick || el.getAttribute('onclick') || 
-                               el.hasAttribute('data-action') || el.hasAttribute('data-click');
-        const hasPointerCursor = style.cursor === 'pointer';
-        
-        if (hasClickHandler || hasPointerCursor) {
-          const text = getTextContent(el);
-          if (text.length < 3 || text.length > 200) return; // Skip very short or very long text
-          if (shouldSkipElement(el, text)) return;
-          
-          const selector = getSelector(el);
-          
-          discovered.push({
-            selector,
-            type: 'clickable',
-            subtype: hasClickHandler ? 'onclick-handler' : 'pointer-cursor',
-            priority: 5,
-            text: text,
-            reason: hasClickHandler ? 'has onclick handler' : 'pointer cursor'
-          });
-          seenElements.add(el);
+      // Element discovery categories with priority scoring
+      const elementCategories = [
+        // High Priority: Navigation & Core Actions
+        {
+          name: 'explicit',
+          priority: 100,
+          selectors: ['button', 'input[type="submit"]', 'input[type="button"]', '[role="button"]'],
+          getSubtype: (el) => {
+            const text = getTextContent(el);
+            if (text.includes('submit') || text.includes('send')) return 'submit';
+            if (text.includes('search')) return 'search';
+            if (text.includes('next') || text.includes('continue')) return 'navigation';
+            return 'button';
+          }
+        },
+        {
+          name: 'navigation',
+          priority: 95,
+          selectors: ['a[href]', 'nav a', '[role="link"]'],
+          getSubtype: (el) => {
+            if (el.closest('nav')) return 'nav-link';
+            if (el.href && el.href.includes('#')) return 'anchor-link';
+            return 'link';
+          }
+        },
+        // Medium Priority: Interactive Content
+        {
+          name: 'expandable',
+          priority: 80,
+          selectors: ['details', '[aria-expanded]', '.accordion', '.collapsible', '.expandable'],
+          getSubtype: (el) => {
+            if (el.tagName === 'DETAILS') return 'details';
+            if (el.hasAttribute('aria-expanded')) return 'aria-expandable';
+            return 'expandable';
+          }
+        },
+        {
+          name: 'tabs',
+          priority: 85,
+          selectors: ['[role="tab"]', '.tab', '.tab-button', '[data-tab]'],
+          getSubtype: () => 'tab'
+        },
+        {
+          name: 'forms',
+          priority: 75,
+          selectors: ['input:not([type="hidden"])', 'select', 'textarea'],
+          getSubtype: (el) => el.type || el.tagName.toLowerCase()
+        },
+        // Lower Priority: Secondary Interactions
+        {
+          name: 'modal-triggers',
+          priority: 70,
+          selectors: ['[data-toggle="modal"]', '[data-modal]', '.modal-trigger'],
+          getSubtype: () => 'modal-trigger'
+        },
+        {
+          name: 'interactive-generic',
+          priority: 60,
+          selectors: ['[onclick]', '[onmouseover]', '[data-action]'],
+          getSubtype: (el) => {
+            if (el.hasAttribute('onclick')) return 'onclick';
+            if (el.hasAttribute('onmouseover')) return 'hover';
+            return 'data-action';
+          }
         }
+      ];
+
+      // Process each category
+      elementCategories.forEach(category => {
+        category.selectors.forEach(selector => {
+          try {
+            const elements = document.querySelectorAll(selector);
+            
+            elements.forEach(element => {
+              if (!isInteractive(element)) return;
+              
+              const text = getTextContent(element);
+              if (shouldSkipElement(element, text)) return;
+              
+              const elementId = element.outerHTML;
+              if (seenElements.has(elementId)) return;
+              seenElements.add(elementId);
+
+              discovered.push({
+                selector: getSelector(element),
+                type: category.name,
+                subtype: category.getSubtype(element),
+                text: text.substring(0, 100),
+                priority: category.priority,
+                rect: element.getBoundingClientRect(),
+                tagName: element.tagName,
+                hasText: text.length > 0,
+                isVisible: true,
+                attributes: {
+                  id: element.id || null,
+                  className: element.className || null,
+                  href: element.href || null,
+                  type: element.type || null
+                }
+              });
+            });
+          } catch (e) {
+            console.warn(`Error processing selector ${selector}:`, e);
+          }
+        });
       });
 
-      // Sort by priority (highest first)
-      return discovered.sort((a, b) => b.priority - a.priority);
+      // Sort by priority and filter duplicates
+      const uniqueElements = discovered
+        .sort((a, b) => b.priority - a.priority)
+        .slice(0, options.maxInteractions);
+
+      return uniqueElements;
     }, this.options);
 
     this.discoveredElements = elements;
+    console.log(`🎯 Discovered ${this.discoveredElements.length} interactive elements`);
     
-    // Group elements by priority for logging
-    const priorityGroups = {};
-    elements.forEach(el => {
-      if (!priorityGroups[el.priority]) priorityGroups[el.priority] = [];
-      priorityGroups[el.priority].push(el);
+    // Log distribution by type
+    const distribution = {};
+    this.discoveredElements.forEach(el => {
+      distribution[el.type] = (distribution[el.type] || 0) + 1;
     });
-    
-    console.log(`📊 Discovered ${elements.length} interactive elements:`);
-    Object.keys(priorityGroups).sort((a, b) => b - a).forEach(priority => {
-      const group = priorityGroups[priority];
-      const types = [...new Set(group.map(el => el.type))].join(', ');
-      console.log(`   Priority ${priority}: ${group.length} elements (${types})`);
-    });
-
-    return elements;
+    console.log('📊 Element distribution:', distribution);
   }
 
-  // Phase 2: Enhanced Change Detection System
+  // Phase 2: Content Change Detection (after interaction)
   async detectContentChanges(beforeState) {
-    await this.page.waitForTimeout(this.options.changeDetectionTimeout);
-    
     return await this.page.evaluate((beforeState) => {
       const changes = {
+        significantChange: false,
         domChanged: false,
-        newElements: [],
-        visibilityChanged: false,
         textChanged: false,
-        layoutChanged: false,
-        newImages: [],
         urlChanged: false,
         activeElementChanged: false,
+        visibilityChanged: false,
         styleChanges: false,
-        significantChange: false
+        newImages: []
       };
 
       // 1. Check URL changes (for navigation)
@@ -394,74 +644,46 @@ class InteractiveContentCapture {
           const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
           return mainContent ? mainContent.textContent.length : 0;
         })(),
-        modalCount: document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup').length,
-        pageTextPreview: document.body.textContent.substring(0, 200)
+        modalCount: document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup').length
       }));
 
-      // Try to interact with the element - Enhanced with multiple strategies
-      const interactionResult = await this.page.evaluate(({ selector, elementType }) => {
-        const element = document.querySelector(selector);
-        if (!element) return { success: false, reason: 'Element not found' };
-
-        // Check if element is still interactive
-        const rect = element.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) {
-          return { success: false, reason: 'Element not visible' };
-        }
-
-        const style = getComputedStyle(element);
-        if (style.display === 'none' || style.visibility === 'hidden') {
-          return { success: false, reason: 'Element hidden' };
-        }
-
-        // Scroll element into view
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
+      // Perform the interaction
+      const interactionResult = await this.page.evaluate((data) => {
         try {
-          if (elementType === 'hover') {
-            // Create and dispatch mouseover event
-            const event = new MouseEvent('mouseover', { bubbles: true });
-            element.dispatchEvent(event);
-            return { success: true, method: 'hover' };
-          } else {
-            // Enhanced click strategies for better success rate
-            
-            // Strategy 1: Standard click
-            element.click();
-            
-            // Strategy 2: For tab-like elements, try additional approaches
-            if (element.getAttribute('role') === 'tab' || 
-                element.classList.contains('tab') || 
-                element.getAttribute('data-tab')) {
-              
-              // Try clicking parent elements (common tab pattern)
-              let parent = element.parentElement;
-              while (parent && parent !== document.body) {
-                if (parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'tab' || 
-                    parent.classList.contains('tab') || parent.onclick) {
-                  parent.click();
-                  break;
-                }
-                parent = parent.parentElement;
-              }
-              
-              // Dispatch multiple event types for better compatibility
-              ['mousedown', 'mouseup', 'click'].forEach(eventType => {
-                const event = new MouseEvent(eventType, { 
-                  bubbles: true, 
-                  cancelable: true,
-                  view: window 
-                });
-                element.dispatchEvent(event);
-              });
-            }
-            
-            return { success: true, method: 'click_enhanced' };
+          const element = document.querySelector(data.selector);
+          if (!element) {
+            return { success: false, reason: 'Element not found' };
           }
+
+          // Check if element is still visible and interactive
+          const rect = element.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) {
+            return { success: false, reason: 'Element not visible' };
+          }
+
+          // Scroll element into view
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+          // Wait a moment for scroll
+          setTimeout(() => {
+            // Determine interaction type based on element
+            if (element.tagName === 'DETAILS') {
+              element.open = !element.open;
+            } else if (element.hasAttribute('aria-expanded')) {
+              const expanded = element.getAttribute('aria-expanded') === 'true';
+              element.setAttribute('aria-expanded', (!expanded).toString());
+              element.click();
+            } else {
+              // Default to click
+              element.click();
+            }
+          }, 100);
+
+          return { success: true, action: 'click' };
         } catch (error) {
           return { success: false, reason: error.message };
         }
-      }, { selector: elementData.selector, elementType: elementData.type });
+      }, { selector: elementData.selector, type: elementData.type });
 
       if (!interactionResult.success) {
         console.log(`   ❌ Interaction failed: ${interactionResult.reason}`);
@@ -508,9 +730,9 @@ class InteractiveContentCapture {
           styleChanges: changes.styleChanges
         });
         
-        // Take screenshot of the new state with descriptive filename
+        // Take screenshot with quality check
         const elementDescription = elementData.text ? elementData.text.substring(0, 15) : elementData.type;
-        const screenshotData = await this.takeScreenshot(`interaction_${index + 1}_${elementDescription.replace(/[^a-zA-Z0-9]/g, '_')}`);
+        const screenshotData = await this.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${elementDescription.replace(/[^a-zA-Z0-9]/g, '_')}`);
         
         // Record interaction
         this.interactionHistory.set(elementData.selector, {
@@ -711,6 +933,8 @@ class InteractiveContentCapture {
       await this.page.waitForTimeout(500);
     }
   }
+
+  // Legacy takeScreenshot method (for compatibility)
   async takeScreenshot(filename) {
     try {
       const screenshotBuffer = await this.page.screenshot({
@@ -739,13 +963,13 @@ class InteractiveContentCapture {
     console.log('🚀 Starting interactive content capture...');
 
     try {
-      // Step 1: Wait for complete page load
-      console.log('⏳ Waiting for complete page load...');
-      await this.waitForCompletePageLoad();
+      // Step 1: Wait for complete page load WITH VALIDATION
+      console.log('⏳ Waiting for complete page load with validation...');
+      await this.waitForCompletePageLoadWithValidation();
 
-      // Step 2: Take baseline screenshot
+      // Step 2: Take baseline screenshot WITH QUALITY CHECK
       console.log('📸 Taking baseline screenshot...');
-      await this.takeScreenshot('00_baseline');
+      await this.takeScreenshotWithQualityCheck('00_baseline');
 
       // Step 3: Discover all interactive elements
       console.log('🔍 Discovering interactive elements...');
@@ -756,7 +980,7 @@ class InteractiveContentCapture {
         return this.screenshots;
       }
 
-      // Step 3: Process elements systematically
+      // Step 4: Process elements systematically
       const maxInteractions = Math.min(this.discoveredElements.length, this.options.maxInteractions);
       console.log(`🎯 Processing top ${maxInteractions} interactive elements...`);
 
@@ -775,15 +999,15 @@ class InteractiveContentCapture {
         }
       }
 
-      // Step 4: Final screenshot if we haven't taken many
+      // Step 5: Final screenshot if we haven't taken many
       if (this.screenshots.length < 3) {
         console.log('📸 Taking final comprehensive screenshot...');
-        await this.takeScreenshot('99_final');
+        await this.takeScreenshotWithQualityCheck('99_final');
       }
 
       console.log(`✅ Capture complete! Generated ${this.screenshots.length} screenshots from ${this.interactionHistory.size} successful interactions`);
       
-      // Step 5: Deduplicate screenshots
+      // Step 6: Deduplicate screenshots
       console.log('🔍 Running image deduplication...');
       const { ImageDeduplicationService } = require('./image-deduplication');
       
