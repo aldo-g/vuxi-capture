@@ -1,5 +1,6 @@
 // Enhanced Interactive Content Capture System
 // This system systematically discovers, interacts with, and captures all interactive content
+// Designed to work generically across all websites without hardcoded assumptions
 
 class InteractiveContentCapture {
   constructor(page, options = {}) {
@@ -10,6 +11,10 @@ class InteractiveContentCapture {
       interactionDelay: options.interactionDelay || 800,
       changeDetectionTimeout: options.changeDetectionTimeout || 2000,
       scrollPauseTime: options.scrollPauseTime || 500,
+      enableHoverCapture: options.enableHoverCapture || false,
+      prioritizeNavigation: options.prioritizeNavigation !== false,
+      skipSocialElements: options.skipSocialElements !== false,
+      maxProcessingTime: options.maxProcessingTime || 120000,
       ...options
     };
     
@@ -27,7 +32,7 @@ class InteractiveContentCapture {
   // Phase 1: Comprehensive Element Discovery
   async discoverInteractiveElements() {
     
-    const elements = await this.page.evaluate(() => {
+    const elements = await this.page.evaluate((options) => {
       const discovered = [];
       const seenElements = new Set();
 
@@ -69,25 +74,54 @@ class InteractiveContentCapture {
         return (element.textContent || element.innerText || '').trim().toLowerCase();
       };
 
+      // Helper to check if element should be skipped (social media, ads, etc.)
+      const shouldSkipElement = (element, text) => {
+        if (!options.skipSocialElements) return false;
+        
+        // Skip common social and tracking elements
+        const socialPatterns = [
+          'share', 'tweet', 'facebook', 'linkedin', 'instagram', 'youtube',
+          'google+', 'pinterest', 'snapchat', 'tiktok', 'whatsapp',
+          'cookie', 'gdpr', 'privacy', 'analytics', 'tracking',
+          'advertisement', 'sponsored', 'promo'
+        ];
+        
+        const textLower = text.toLowerCase();
+        const classNames = (element.className || '').toLowerCase();
+        const id = (element.id || '').toLowerCase();
+        
+        return socialPatterns.some(pattern => 
+          textLower.includes(pattern) || classNames.includes(pattern) || id.includes(pattern)
+        );
+      };
+
       // Helper function to get element priority (higher = more important)
       function getElementPriority(element, text) {
         // Navigation elements get highest priority
-        if (element.closest('nav, .nav, .navigation, .menu')) return 10;
+        if (element.closest('nav, .nav, .navigation, .menu, header, .header')) return 10;
         
-        // Tab-related elements
+        // Tab-related elements (generic detection)
         if (element.getAttribute('role') === 'tab') return 10;
-        if (text.includes('tab')) return 9;
+        if (element.getAttribute('role') === 'tabpanel') return 9;
+        if (element.classList.contains('tab') || element.getAttribute('data-tab')) return 9;
         
-        // Expandable content indicators
-        if (text.includes('more') || text.includes('expand') || text.includes('show')) return 8;
+        // Expandable content indicators (generic)
+        const expandableKeywords = ['more', 'expand', 'show', 'toggle', 'collapse', 'accordion'];
+        if (expandableKeywords.some(keyword => text.includes(keyword))) return 8;
         
         // Structural elements
         if (element.tagName === 'SUMMARY') return 9;
         if (element.getAttribute('aria-expanded') === 'false') return 8;
         
+        // Modal and overlay triggers
+        if (element.getAttribute('data-modal') || element.getAttribute('data-toggle') === 'modal') return 7;
+        
         // Regular buttons and links
         if (element.tagName === 'BUTTON') return 7;
-        if (element.tagName === 'A') return 6;
+        if (element.tagName === 'A' && element.getAttribute('href') !== '#') return 6;
+        
+        // Form elements
+        if (['SELECT', 'INPUT', 'TEXTAREA'].includes(element.tagName)) return 6;
         
         // Everything else
         return 5;
@@ -99,6 +133,8 @@ class InteractiveContentCapture {
         if (!isInteractive(el) || seenElements.has(el)) return;
         
         const text = getTextContent(el);
+        if (shouldSkipElement(el, text)) return;
+        
         const selector = getSelector(el);
         
         discovered.push({
@@ -118,6 +154,8 @@ class InteractiveContentCapture {
         if (!isInteractive(el) || seenElements.has(el)) return;
         
         const text = getTextContent(el);
+        if (shouldSkipElement(el, text)) return;
+        
         const selector = getSelector(el);
         
         discovered.push({
@@ -137,6 +175,8 @@ class InteractiveContentCapture {
         if (!isInteractive(el) || seenElements.has(el)) return;
         
         const text = getTextContent(el.closest('label')) || getTextContent(el);
+        if (shouldSkipElement(el, text)) return;
+        
         const selector = getSelector(el);
         
         discovered.push({
@@ -150,20 +190,25 @@ class InteractiveContentCapture {
         seenElements.add(el);
       });
 
-      // 4. HOVER-ACTIVATED ELEMENTS
-      document.querySelectorAll('[title], [data-tooltip], .tooltip-trigger, [onmouseover]').forEach(el => {
-        if (seenElements.has(el) || !isInteractive(el)) return;
-        
-        discovered.push({
-          selector: getSelector(el),
-          type: 'hover',
-          subtype: 'tooltip-trigger',
-          priority: 3, // Lower priority
-          text: getTextContent(el),
-          reason: 'hover-activated element'
+      // 4. HOVER-ACTIVATED ELEMENTS (if enabled)
+      if (options.enableHoverCapture) {
+        document.querySelectorAll('[title], [data-tooltip], .tooltip-trigger, [onmouseover]').forEach(el => {
+          if (seenElements.has(el) || !isInteractive(el)) return;
+          
+          const text = getTextContent(el);
+          if (shouldSkipElement(el, text)) return;
+          
+          discovered.push({
+            selector: getSelector(el),
+            type: 'hover',
+            subtype: 'tooltip-trigger',
+            priority: 3, // Lower priority
+            text: text,
+            reason: 'hover-activated element'
+          });
+          seenElements.add(el);
         });
-        seenElements.add(el);
-      });
+      }
 
       // 5. CLICKABLE ELEMENTS
       // Elements with click handlers or pointer cursor
@@ -178,6 +223,7 @@ class InteractiveContentCapture {
         if (hasClickHandler || hasPointerCursor) {
           const text = getTextContent(el);
           if (text.length < 3 || text.length > 200) return; // Skip very short or very long text
+          if (shouldSkipElement(el, text)) return;
           
           const selector = getSelector(el);
           
@@ -195,7 +241,7 @@ class InteractiveContentCapture {
 
       // Sort by priority (highest first)
       return discovered.sort((a, b) => b.priority - a.priority);
-    });
+    }, this.options);
 
     this.discoveredElements = elements;
     
@@ -206,8 +252,11 @@ class InteractiveContentCapture {
       priorityGroups[el.priority].push(el);
     });
     
+    console.log(`📊 Discovered ${elements.length} interactive elements:`);
     Object.keys(priorityGroups).sort((a, b) => b - a).forEach(priority => {
-      console.log(`   Priority ${priority}: ${priorityGroups[priority].length} elements (${priorityGroups[priority][0]?.type})`);
+      const group = priorityGroups[priority];
+      const types = [...new Set(group.map(el => el.type))].join(', ');
+      console.log(`   Priority ${priority}: ${group.length} elements (${types})`);
     });
 
     return elements;
@@ -221,27 +270,30 @@ class InteractiveContentCapture {
       const changes = {
         domChanged: false,
         newElements: [],
-        visibilityChanged: [],
+        visibilityChanged: false,
         textChanged: false,
         layoutChanged: false,
         newImages: [],
         urlChanged: false,
         activeElementChanged: false,
-        styleChanges: false
+        styleChanges: false,
+        significantChange: false
       };
 
       // 1. Check URL changes (for navigation)
       if (window.location.href !== beforeState.url) {
         changes.urlChanged = true;
+        changes.significantChange = true;
       }
 
       // 2. Check DOM structure changes (more sensitive)
       const currentDomHash = document.documentElement.innerHTML.length;
       if (Math.abs(currentDomHash - beforeState.domHash) > 50) {  // More sensitive threshold
         changes.domChanged = true;
+        changes.significantChange = true;
       }
 
-      // 3. Check for visibility changes (key for tabs)
+      // 3. Check for visibility changes (key for tabs and expandable content)
       const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -254,40 +306,51 @@ class InteractiveContentCapture {
       const visibilityChange = Math.abs(visibleElements.length - beforeState.visibleElementCount);
       if (visibilityChange > 2) {  // More than 2 elements changed visibility
         changes.visibilityChanged = true;
+        changes.significantChange = true;
       }
 
       // 4. Check for active/selected element changes
-      const activeElement = document.activeElement;
       const selectedElements = document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]');
       if (selectedElements.length !== beforeState.selectedElementCount) {
         changes.activeElementChanged = true;
+        changes.significantChange = true;
       }
 
       // 5. Check for new images
       const images = document.querySelectorAll('img');
       if (images.length > beforeState.imageCount) {
         changes.newImages = Array.from(images).slice(beforeState.imageCount);
+        changes.significantChange = true;
       }
 
       // 6. More sensitive text content change detection
       const currentTextLength = document.body.textContent.length;
       if (Math.abs(currentTextLength - beforeState.textLength) > 50) {  // Lower threshold
         changes.textChanged = true;
+        changes.significantChange = true;
       }
 
       // 7. Check for significant style changes (hidden/shown content)
       const hiddenElements = document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]');
       if (Math.abs(hiddenElements.length - beforeState.hiddenElementCount) > 1) {
         changes.styleChanges = true;
+        changes.significantChange = true;
       }
 
       // 8. Check for content area changes (common in SPAs)
       const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
       if (mainContent) {
         const currentMainText = mainContent.textContent.length;
-        if (Math.abs(currentMainText - beforeState.mainContentLength) > 100) {
+        if (Math.abs(currentMainText - (beforeState.mainContentLength || 0)) > 100) {
           changes.textChanged = true;
+          changes.significantChange = true;
         }
+      }
+
+      // 9. Check for modal/overlay appearance
+      const modals = document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup');
+      if (modals.length > (beforeState.modalCount || 0)) {
+        changes.significantChange = true;
       }
 
       return changes;
@@ -303,11 +366,14 @@ class InteractiveContentCapture {
       mainContentLength: await this.page.evaluate(() => {
         const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
         return mainContent ? mainContent.textContent.length : 0;
-      })
+      }),
+      modalCount: await this.page.evaluate(() => 
+        document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup').length
+      )
     });
   }
 
-  // Phase 3: Smart Interaction Logic
+  // Phase 3: Generic Smart Interaction Logic
   async interactWithElement(elementData, index) {
     try {
       console.log(`🎯 Interacting with element ${index + 1}/${this.discoveredElements.length}: ${elementData.type} - "${elementData.text.substring(0, 50)}"`);
@@ -328,7 +394,8 @@ class InteractiveContentCapture {
           const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
           return mainContent ? mainContent.textContent.length : 0;
         })(),
-        pageTextPreview: document.body.textContent.substring(0, 200) // First 200 chars for comparison
+        modalCount: document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup').length,
+        pageTextPreview: document.body.textContent.substring(0, 200)
       }));
 
       // Try to interact with the element - Enhanced with multiple strategies
@@ -357,16 +424,17 @@ class InteractiveContentCapture {
             element.dispatchEvent(event);
             return { success: true, method: 'hover' };
           } else {
-            // Multiple click strategies for better success rate
+            // Enhanced click strategies for better success rate
             
             // Strategy 1: Standard click
             element.click();
             
-            // Strategy 2: If element text suggests it's a tab, try alternative approaches
-            const elementText = (element.textContent || '').toLowerCase();
-            if (elementText.includes('experience') || elementText.includes('tab')) {
+            // Strategy 2: For tab-like elements, try additional approaches
+            if (element.getAttribute('role') === 'tab' || 
+                element.classList.contains('tab') || 
+                element.getAttribute('data-tab')) {
               
-              // Strategy 2a: Try clicking parent elements (common tab pattern)
+              // Try clicking parent elements (common tab pattern)
               let parent = element.parentElement;
               while (parent && parent !== document.body) {
                 if (parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'tab' || 
@@ -377,17 +445,7 @@ class InteractiveContentCapture {
                 parent = parent.parentElement;
               }
               
-              // Strategy 2b: Try finding and clicking related tab elements
-              const tabButtons = document.querySelectorAll('[role="tab"], .tab, button[data-tab], [aria-controls]');
-              for (const tab of tabButtons) {
-                const tabText = (tab.textContent || '').toLowerCase();
-                if (tabText.includes('experience')) {
-                  tab.click();
-                  break;
-                }
-              }
-              
-              // Strategy 2c: Dispatch multiple event types
+              // Dispatch multiple event types for better compatibility
               ['mousedown', 'mouseup', 'click'].forEach(eventType => {
                 const event = new MouseEvent(eventType, { 
                   bubbles: true, 
@@ -410,62 +468,37 @@ class InteractiveContentCapture {
         return null;
       }
       
-      // Wait for immediate response to the click
+      // Wait for immediate response to the interaction
       await this.page.waitForTimeout(this.options.interactionDelay);
 
-      // Special handling for tab-like elements
-      const isTabElement = elementData.text.includes('experience') || 
-                         elementData.text.includes('projects') || 
-                         elementData.selector.includes('tab') ||
-                         elementData.text.includes('tab');
-
-      if (isTabElement) {
+      // Enhanced waiting strategy based on element type
+      if (elementData.type === 'explicit' && elementData.subtype === 'button') {
+        // Wait longer for buttons as they often trigger significant changes
+        await this.page.waitForTimeout(1500);
         
-        // Wait for tab transition animations
-        await this.page.waitForTimeout(2000);
-        
-        // Wait for network requests to complete (common in tab switches)
+        // Wait for network requests to complete (common in dynamic content)
         try {
-          await this.page.waitForLoadState('networkidle', { timeout: 3000 });
+          await this.page.waitForLoadState('networkidle', { timeout: 5000 });
         } catch (e) {
           console.log(`   ⚠️  Network idle timeout, continuing anyway...`);
         }
         
-        // Additional wait for dynamic content
+        // Wait for any new images that might have loaded
+        await this.waitForImages();
+        
+      } else if (elementData.type === 'expandable') {
+        // Wait for animations and transitions
         await this.page.waitForTimeout(1000);
+        await this.waitForAnimations();
       }
 
-      // Get page state after interaction and all waits
-      const afterState = await this.page.evaluate(() => ({
-        domHash: document.documentElement.innerHTML.length,
-        textLength: document.body.textContent.length,
-        pageTextPreview: document.body.textContent.substring(0, 300), // Increased to 300 chars
-        visibleElementCount: Array.from(document.querySelectorAll('*')).filter(el => {
-          const rect = el.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        }).length,
-        selectedElementCount: document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length,
-        mainContentLength: (() => {
-          const mainContent = document.querySelector('main, [role="main"], .main-content, #main, .content');
-          return mainContent ? mainContent.textContent.length : 0;
-        })(),
-        // Check for specific content indicators
-        hasProjectsContent: document.body.textContent.toLowerCase().includes('featured projects'),
-        hasExperienceContent: document.body.textContent.toLowerCase().includes('professional experience') || 
-                             document.body.textContent.toLowerCase().includes('devops engineer'),
-        bodyTextHash: document.body.textContent.replace(/\s+/g, ' ').trim().substring(0, 500)
-      }));
-      // Enhanced change detection based on content type
-      let contentTypeChanged = false;
-      if (elementData.text.includes('experience')) {
-        contentTypeChanged = afterState.hasExperienceContent && !beforeState.hasProjectsContent;
-        console.log(`     - Experience tab success: ${contentTypeChanged ? '✅ SUCCESS' : '❌ FAILED'}`);
-      } else if (elementData.text.includes('projects')) {
-        contentTypeChanged = afterState.hasProjectsContent && !beforeState.hasExperienceContent;
-        console.log(`     - Projects tab success: ${contentTypeChanged ? '✅ SUCCESS' : '❌ FAILED'}`);
-      }
+      // Additional wait for content to stabilize
+      await this.page.waitForTimeout(500);
 
-      if (hasSignificantChanges) {
+      // Detect changes after interaction
+      const changes = await this.detectContentChanges(beforeState);
+
+      if (changes.significantChange) {
         console.log(`   ✅ Content changed! Details:`, {
           domChanged: changes.domChanged,
           textChanged: changes.textChanged,
@@ -474,30 +507,6 @@ class InteractiveContentCapture {
           visibilityChanged: changes.visibilityChanged,
           styleChanges: changes.styleChanges
         });
-        
-        // For important tab elements, wait even longer to ensure content is stable
-        if (elementData.text.includes('experience')) {
-          await this.page.waitForTimeout(3000);
-          
-          // Check if experience content is actually visible
-          const experienceContentCheck = await this.page.evaluate(() => {
-            const bodyText = document.body.textContent.toLowerCase();
-            const hasExperienceKeywords = bodyText.includes('experience') && 
-                                        (bodyText.includes('work') || bodyText.includes('role') || 
-                                         bodyText.includes('company') || bodyText.includes('position') ||
-                                         bodyText.includes('job') || bodyText.includes('career'));
-            
-            // Also check for specific experience content structure
-            const experienceElements = document.querySelectorAll('[class*="experience"], [id*="experience"], [data-*="experience"]');
-            
-            return {
-              hasExperienceKeywords,
-              experienceElementsFound: experienceElements.length,
-              bodyTextSample: document.body.textContent.substring(0, 500)
-            };
-          });
-          
-        }
         
         // Take screenshot of the new state with descriptive filename
         const elementDescription = elementData.text ? elementData.text.substring(0, 15) : elementData.type;
@@ -524,7 +533,184 @@ class InteractiveContentCapture {
     }
   }
 
-  // Phase 4: Screenshot Management
+  // Enhanced page load waiting system
+  async waitForCompletePageLoad() {
+    console.log('🔄 Ensuring complete page load...');
+    
+    try {
+      // Step 1: Wait for network to be idle (no requests for 500ms)
+      console.log('   📡 Waiting for network idle...');
+      await this.page.waitForLoadState('networkidle', { timeout: 10000 });
+      
+      // Step 2: Wait for DOM to be completely loaded
+      console.log('   🌐 Waiting for DOM content loaded...');
+      await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 });
+      
+      // Step 3: Wait for all images to load
+      console.log('   🖼️  Waiting for images to load...');
+      await this.waitForImages();
+      
+      // Step 4: Wait for fonts to load
+      console.log('   📝 Waiting for fonts to load...');
+      await this.waitForFonts();
+      
+      // Step 5: Wait for CSS animations/transitions to complete
+      console.log('   ✨ Waiting for animations to settle...');
+      await this.waitForAnimations();
+      
+      // Step 6: Wait for lazy-loaded content
+      console.log('   🔄 Triggering lazy-loaded content...');
+      await this.triggerLazyLoading();
+      
+      // Step 7: Final stability check
+      console.log('   ⚖️  Performing stability check...');
+      await this.waitForPageStability();
+      
+      console.log('✅ Page fully loaded and stable');
+      
+    } catch (error) {
+      console.log(`⚠️  Page load timeout, continuing anyway: ${error.message}`);
+    }
+  }
+
+  // Wait for all images to load
+  async waitForImages() {
+    return await this.page.evaluate(async () => {
+      const images = Array.from(document.querySelectorAll('img'));
+      
+      if (images.length === 0) return;
+      
+      const imagePromises = images.map(img => {
+        return new Promise((resolve) => {
+          if (img.complete) {
+            resolve();
+          } else {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true }); // Resolve even on error
+            
+            // Timeout after 5 seconds for any single image
+            setTimeout(resolve, 5000);
+          }
+        });
+      });
+      
+      await Promise.all(imagePromises);
+      console.log(`   ✅ ${images.length} images loaded`);
+    });
+  }
+
+  // Wait for fonts to load
+  async waitForFonts() {
+    return await this.page.evaluate(async () => {
+      if ('fonts' in document) {
+        try {
+          await document.fonts.ready;
+          console.log('   ✅ Fonts loaded');
+        } catch (e) {
+          console.log('   ⚠️  Font loading timeout');
+        }
+      }
+    });
+  }
+
+  // Wait for CSS animations and transitions to complete
+  async waitForAnimations() {
+    await this.page.evaluate(async () => {
+      const elementsWithAnimations = Array.from(document.querySelectorAll('*')).filter(el => {
+        const style = getComputedStyle(el);
+        return style.animationName !== 'none' || style.transitionProperty !== 'none';
+      });
+      
+      if (elementsWithAnimations.length > 0) {
+        console.log(`   🎬 Found ${elementsWithAnimations.length} elements with animations`);
+        
+        // Wait for animations to complete
+        const animationPromises = elementsWithAnimations.map(el => {
+          return new Promise(resolve => {
+            const onAnimationEnd = () => {
+              el.removeEventListener('animationend', onAnimationEnd);
+              el.removeEventListener('transitionend', onAnimationEnd);
+              resolve();
+            };
+            
+            el.addEventListener('animationend', onAnimationEnd, { once: true });
+            el.addEventListener('transitionend', onAnimationEnd, { once: true });
+            
+            // Timeout after 3 seconds
+            setTimeout(resolve, 3000);
+          });
+        });
+        
+        await Promise.race([
+          Promise.all(animationPromises),
+          new Promise(resolve => setTimeout(resolve, 3000)) // Max 3 seconds
+        ]);
+      }
+    });
+    
+    // Additional wait for any remaining animations
+    await this.page.waitForTimeout(500);
+  }
+
+  // Trigger lazy loading by scrolling
+  async triggerLazyLoading() {
+    const pageHeight = await this.page.evaluate(() => document.body.scrollHeight);
+    const viewportHeight = await this.page.evaluate(() => window.innerHeight);
+    
+    // Scroll through the page to trigger lazy loading
+    let currentPosition = 0;
+    const scrollStep = viewportHeight * 0.8; // Scroll 80% of viewport at a time
+    
+    while (currentPosition < pageHeight) {
+      await this.page.evaluate((position) => {
+        window.scrollTo(0, position);
+      }, currentPosition);
+      
+      // Wait a bit for lazy content to load
+      await this.page.waitForTimeout(300);
+      
+      currentPosition += scrollStep;
+    }
+    
+    // Scroll back to top
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    await this.page.waitForTimeout(500);
+    
+    // Wait for any newly loaded images
+    await this.waitForImages();
+  }
+
+  // Check page stability (no more DOM changes)
+  async waitForPageStability() {
+    let previousDomHash = '';
+    let stableCount = 0;
+    const maxChecks = 10;
+    
+    for (let i = 0; i < maxChecks; i++) {
+      const currentDomHash = await this.page.evaluate(() => {
+        // Create a hash of the visible content structure
+        const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+        
+        return visibleElements.length + '_' + document.body.textContent.length;
+      });
+      
+      if (currentDomHash === previousDomHash) {
+        stableCount++;
+        if (stableCount >= 3) { // 3 consecutive stable checks
+          console.log('   ✅ Page content stable');
+          break;
+        }
+      } else {
+        stableCount = 0;
+      }
+      
+      previousDomHash = currentDomHash;
+      await this.page.waitForTimeout(500);
+    }
+  }
   async takeScreenshot(filename) {
     try {
       const screenshotBuffer = await this.page.screenshot({
@@ -540,6 +726,7 @@ class InteractiveContentCapture {
       };
 
       this.screenshots.push(screenshotData);
+      console.log(`   📸 Screenshot saved: ${filename}.png`);
       return screenshotData;
     } catch (error) {
       console.error(`Failed to take screenshot: ${error.message}`);
@@ -552,11 +739,16 @@ class InteractiveContentCapture {
     console.log('🚀 Starting interactive content capture...');
 
     try {
-      // Step 1: Take baseline screenshot
+      // Step 1: Wait for complete page load
+      console.log('⏳ Waiting for complete page load...');
+      await this.waitForCompletePageLoad();
+
+      // Step 2: Take baseline screenshot
       console.log('📸 Taking baseline screenshot...');
       await this.takeScreenshot('00_baseline');
 
-      // Step 2: Discover all interactive elements
+      // Step 3: Discover all interactive elements
+      console.log('🔍 Discovering interactive elements...');
       await this.discoverInteractiveElements();
 
       if (this.discoveredElements.length === 0) {
@@ -589,7 +781,25 @@ class InteractiveContentCapture {
         await this.takeScreenshot('99_final');
       }
 
-      console.log(`✅ Capture complete! Generated ${this.screenshots.length} screenshots`);
+      console.log(`✅ Capture complete! Generated ${this.screenshots.length} screenshots from ${this.interactionHistory.size} successful interactions`);
+      
+      // Step 5: Deduplicate screenshots
+      console.log('🔍 Running image deduplication...');
+      const { ImageDeduplicationService } = require('./image-deduplication');
+      
+      const deduplicationService = new ImageDeduplicationService({
+        similarityThreshold: 95, // 95% similarity threshold
+        keepHighestQuality: true, // Keep highest quality when duplicates found
+        preserveFirst: false, // Don't always preserve first (baseline) screenshot
+        verbose: true // Enable detailed logging
+      });
+      
+      this.screenshots = await deduplicationService.processScreenshots(this.screenshots);
+      
+      // Update the capture report with deduplication info
+      this.deduplicationReport = deduplicationService.getDeduplicationReport();
+      
+      console.log(`🎉 Final result: ${this.screenshots.length} unique screenshots ready!`);
       return this.screenshots;
 
     } catch (error) {
@@ -606,7 +816,8 @@ class InteractiveContentCapture {
       discoveredElements: this.discoveredElements.length,
       successfulInteractions: Array.from(this.interactionHistory.values()).filter(h => h.screenshot).length,
       elementTypes: {},
-      interactionTypes: {}
+      interactionTypes: {},
+      deduplication: this.deduplicationReport || null
     };
 
     // Analyze discovered elements
