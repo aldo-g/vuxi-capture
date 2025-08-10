@@ -26,7 +26,6 @@ class InteractiveContentCapture {
 
   // Phase 1: Comprehensive Element Discovery
   async discoverInteractiveElements() {
-    console.log('🔍 Starting comprehensive element discovery...');
     
     const elements = await this.page.evaluate(() => {
       const discovered = [];
@@ -199,7 +198,6 @@ class InteractiveContentCapture {
     });
 
     this.discoveredElements = elements;
-    console.log(`🎯 Discovered ${elements.length} interactive elements`);
     
     // Group elements by priority for logging
     const priorityGroups = {};
@@ -333,8 +331,6 @@ class InteractiveContentCapture {
         pageTextPreview: document.body.textContent.substring(0, 200) // First 200 chars for comparison
       }));
 
-      console.log(`   📊 Before interaction - Text preview: "${beforeState.pageTextPreview.replace(/\s+/g, ' ').trim()}"`);
-
       // Try to interact with the element - Enhanced with multiple strategies
       const interactionResult = await this.page.evaluate(({ selector, elementType }) => {
         const element = document.querySelector(selector);
@@ -413,8 +409,6 @@ class InteractiveContentCapture {
         console.log(`   ❌ Interaction failed: ${interactionResult.reason}`);
         return null;
       }
-
-      console.log(`   ✅ Click successful, waiting for initial response...`);
       
       // Wait for immediate response to the click
       await this.page.waitForTimeout(this.options.interactionDelay);
@@ -426,8 +420,6 @@ class InteractiveContentCapture {
                          elementData.text.includes('tab');
 
       if (isTabElement) {
-        console.log(`   🎯 DETECTED TAB ELEMENT: "${elementData.text}"`);
-        console.log(`   ⏳ Waiting for tab content to fully load...`);
         
         // Wait for tab transition animations
         await this.page.waitForTimeout(2000);
@@ -463,18 +455,6 @@ class InteractiveContentCapture {
                              document.body.textContent.toLowerCase().includes('devops engineer'),
         bodyTextHash: document.body.textContent.replace(/\s+/g, ' ').trim().substring(0, 500)
       }));
-
-      console.log(`   📊 After interaction - Text preview: "${afterState.pageTextPreview.replace(/\s+/g, ' ').trim()}"`);
-      console.log(`   📊 Content comparison:`);
-      console.log(`     - DOM size change: ${beforeState.domHash} → ${afterState.domHash} (${afterState.domHash - beforeState.domHash})`);
-      console.log(`     - Text length change: ${beforeState.textLength} → ${afterState.textLength} (${afterState.textLength - beforeState.textLength})`);
-      console.log(`     - Visible elements: ${beforeState.visibleElementCount} → ${afterState.visibleElementCount} (${afterState.visibleElementCount - beforeState.visibleElementCount})`);
-      console.log(`     - Selected elements: ${beforeState.selectedElementCount} → ${afterState.selectedElementCount}`);
-      console.log(`     - Text content same: ${beforeState.pageTextPreview === afterState.pageTextPreview ? '❌ IDENTICAL' : '✅ CHANGED'}`);
-      console.log(`     - Body text hash same: ${beforeState.bodyTextHash === afterState.bodyTextHash ? '❌ IDENTICAL' : '✅ CHANGED'}`);
-      console.log(`     - Projects content: ${afterState.hasProjectsContent ? '✅ DETECTED' : '❌ NOT FOUND'}`);
-      console.log(`     - Experience content: ${afterState.hasExperienceContent ? '✅ DETECTED' : '❌ NOT FOUND'}`);
-
       // Enhanced change detection based on content type
       let contentTypeChanged = false;
       if (elementData.text.includes('experience')) {
@@ -497,7 +477,6 @@ class InteractiveContentCapture {
         
         // For important tab elements, wait even longer to ensure content is stable
         if (elementData.text.includes('experience')) {
-          console.log(`   🎯 EXPERIENCE TAB DETECTED! Waiting extra time for content to stabilize...`);
           await this.page.waitForTimeout(3000);
           
           // Check if experience content is actually visible
@@ -518,7 +497,6 @@ class InteractiveContentCapture {
             };
           });
           
-          console.log(`   📋 Experience content check:`, experienceContentCheck);
         }
         
         // Take screenshot of the new state with descriptive filename

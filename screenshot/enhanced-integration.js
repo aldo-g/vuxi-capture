@@ -31,16 +31,10 @@ class EnhancedScreenshotCapture {
     // Create output directory structure
     this.screenshotsDir = path.join(outputDir, 'desktop');
     fs.ensureDirSync(this.screenshotsDir);
-    
-    console.log(`📁 Screenshots will be saved to: ${this.screenshotsDir}`);
-    if (this.interactiveOptions.enableInteractiveCapture) {
-      console.log(`🎯 Interactive capture enabled (max ${this.interactiveOptions.maxScreenshotsPerPage} screenshots per page)`);
-    }
   }
   
   async init() {
     if (!this.browser) {
-      console.log('🚀 Launching browser...');
       this.browser = await chromium.launch({
         headless: true,
         args: [
@@ -60,11 +54,9 @@ class EnhancedScreenshotCapture {
   
   async close() {
     if (this.browser) {
-      console.log('🛑 Closing browser...');
       try {
         await this.browser.close();
         this.browser = null;
-        console.log('✅ Browser closed successfully');
       } catch (error) {
         console.error('⚠️ Error closing browser:', error.message);
         this.browser = null;
@@ -78,7 +70,7 @@ class EnhancedScreenshotCapture {
     
     try {
       await this.init();
-      console.log(`\n📸 [${index}] Starting enhanced capture: ${url}`);
+      console.log(`📸 [${index}] Starting capture: ${url}`);
       
       // Create browser context
       context = await this.browser.newContext({
@@ -91,7 +83,6 @@ class EnhancedScreenshotCapture {
       const page = await context.newPage();
       
       // Navigate to page
-      console.log(`  ⏳ Loading page...`);
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
         timeout: this.timeout
@@ -102,12 +93,9 @@ class EnhancedScreenshotCapture {
       }
       
       // Wait for network idle
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
-        console.log('  ⚠️  Network idle timeout, proceeding anyway');
-      });
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
       
       // Apply page enhancements (cookie removal, etc.)
-      console.log(`  ✨ Applying page enhancements...`);
       await this.enhancer.enhance(page);
       await page.waitForTimeout(1000);
       
@@ -115,8 +103,6 @@ class EnhancedScreenshotCapture {
       
       if (this.interactiveOptions.enableInteractiveCapture) {
         // ENHANCED INTERACTIVE CAPTURE
-        console.log(`  🎯 Starting interactive content discovery and capture...`);
-        
         const interactiveCapture = new InteractiveContentCapture(page, {
           maxInteractions: this.interactiveOptions.maxInteractions,
           maxScreenshots: this.interactiveOptions.maxScreenshotsPerPage,
@@ -125,30 +111,20 @@ class EnhancedScreenshotCapture {
         
         const screenshots = await interactiveCapture.captureInteractiveContent();
         
-        console.log(`  🔍 DEBUG: Received ${screenshots.length} screenshots from InteractiveContentCapture`);
-        
         // Save all screenshots from interactive capture
         for (let i = 0; i < screenshots.length; i++) {
           const screenshot = screenshots[i];
           const filename = createEnhancedFilename(url, index, i);
           const filepath = path.join(this.screenshotsDir, filename);
           
-          console.log(`  💾 DEBUG: Saving screenshot ${i + 1}/${screenshots.length}:`);
-          console.log(`    - Filename: ${filename}`);
-          console.log(`    - Filepath: ${filepath}`);
-          console.log(`    - Screenshot object keys:`, Object.keys(screenshot));
-          console.log(`    - Buffer size:`, screenshot.buffer ? screenshot.buffer.length : 'NO BUFFER');
-          
           try {
             if (screenshot.buffer && screenshot.buffer.length > 0) {
               await fs.writeFile(filepath, screenshot.buffer);
-              console.log(`    ✅ Successfully saved ${filename} (${screenshot.buffer.length} bytes)`);
             } else {
-              console.log(`    ❌ No valid buffer for ${filename}`);
               continue;
             }
           } catch (saveError) {
-            console.error(`    ❌ Error saving ${filename}:`, saveError.message);
+            console.error(`❌ Error saving ${filename}:`, saveError.message);
             continue;
           }
           
@@ -163,17 +139,9 @@ class EnhancedScreenshotCapture {
           });
         }
         
-        console.log(`  📊 DEBUG: Successfully saved ${captureResults.length} out of ${screenshots.length} screenshots`);
-        
-        // Generate capture report
-        const report = interactiveCapture.getCaptureReport();
-        console.log(`  📊 Interactive capture report:`);
-        console.log(`     • Total screenshots: ${report.totalScreenshots}`);
-        console.log(`     • Successful interactions: ${report.successfulInteractions}/${report.discoveredElements}`);
-        console.log(`     • Element types found: ${Object.keys(report.elementTypes).join(', ')}`);
-        
         // Save detailed report
         const reportPath = path.join(this.screenshotsDir, `${createFilename(url, index)}_report.json`);
+        const report = interactiveCapture.getCaptureReport();
         await fs.writeJson(reportPath, {
           url,
           timestamp: new Date().toISOString(),
@@ -184,8 +152,6 @@ class EnhancedScreenshotCapture {
         
       } else {
         // STANDARD SINGLE SCREENSHOT
-        console.log(`  📷 Taking standard screenshot...`);
-        
         const filename = createFilename(url, index);
         const filepath = path.join(this.screenshotsDir, filename);
         
@@ -207,20 +173,20 @@ class EnhancedScreenshotCapture {
       }
       
       const duration = Date.now() - startTime;
-      console.log(`  ✅ Enhanced capture complete in ${duration}ms: ${captureResults.length} screenshots`);
+      console.log(`✅ Captured ${captureResults.length} screenshots in ${duration}ms`);
       
       return captureResults;
       
     } catch (error) {
       const duration = Date.now() - startTime;
-      console.error(`  ❌ Error after ${duration}ms: ${error.message}`);
+      console.error(`❌ Error after ${duration}ms: ${error.message}`);
       throw error;
     } finally {
       if (context) {
         try {
           await context.close();
         } catch (closeError) {
-          console.error(`  ⚠️  Error closing context: ${closeError.message}`);
+          console.error(`⚠️ Error closing context: ${closeError.message}`);
         }
       }
     }
@@ -250,12 +216,7 @@ class EnhancedScreenshotService {
     let screenshotCapture = null;
     
     try {
-      console.log('📸 Enhanced Screenshot Service Starting...');
-      console.log(`📋 URLs to capture: ${urls.length}`);
-      console.log(`📁 Output: ${this.outputDir}`);
-      console.log(`📐 Viewport: ${this.viewport.width}x${this.viewport.height}`);
-      console.log(`🔀 Concurrency: ${this.concurrent} pages at once`);
-      console.log(`🎯 Interactive capture: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
+      console.log(`📸 Starting capture of ${urls.length} URLs`);
       
       if (this.enableInteractiveCapture) {
         console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
@@ -279,14 +240,8 @@ class EnhancedScreenshotService {
       
       for (let i = 0; i < urls.length; i += batchSize) {
         const currentBatch = urls.slice(i, i + batchSize);
-        
-        console.log(`\n📦 Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(urls.length/batchSize)} (${currentBatch.length} URLs concurrently)`);
-        
         const batchResults = await this.processBatchConcurrent(currentBatch, i, screenshotCapture);
         allResults.push(...batchResults);
-        
-        const completed = Math.min(i + batchSize, urls.length);
-        console.log(`✅ Completed ${completed}/${urls.length} URLs`);
       }
       
       // Calculate statistics
@@ -308,148 +263,88 @@ class EnhancedScreenshotService {
         failed_captures: failed.length,
         total_screenshots: totalScreenshots,
         interactive_capture_enabled: this.enableInteractiveCapture,
-        average_screenshots_per_page: successful.length > 0 ? (totalScreenshots / successful.length).toFixed(1) : '0',
-        results: allResults,
-        configuration: {
-          viewport: this.viewport,
-          timeout: this.timeout,
-          concurrent: this.concurrent,
-          enableInteractiveCapture: this.enableInteractiveCapture,
-          maxInteractions: this.maxInteractions,
-          maxScreenshotsPerPage: this.maxScreenshotsPerPage,
-          interactionDelay: this.interactionDelay
-        }
+        average_screenshots_per_page: successful.length > 0 ? 
+          (totalScreenshots / successful.length).toFixed(1) : '0.0',
+        interactive_pages_found: successful.filter(r => 
+          Array.isArray(r.data) && r.data.length > 1
+        ).length
       };
       
+      // Save enhanced metadata
       const metadataPath = path.join(this.outputDir, 'enhanced_metadata.json');
       await fs.writeJson(metadataPath, metadata, { spaces: 2 });
       
-      // Enhanced summary
-      console.log('\n🎉 Enhanced screenshot service completed');
+      console.log(`🎉 Enhanced screenshot service completed`);
       console.log(`📸 Total screenshots: ${totalScreenshots} (avg ${metadata.average_screenshots_per_page} per page)`);
-      console.log(`⚡ Processing speed: ${(totalScreenshots / duration).toFixed(1)} screenshots/second`);
+      console.log(`⚡ Processing speed: ${(totalScreenshots/duration).toFixed(1)} screenshots/second`);
       console.log(`⏱️  Total duration: ${duration.toFixed(2)} seconds`);
       console.log(`✅ Successful pages: ${successful.length}/${urls.length}`);
       console.log(`❌ Failed pages: ${failed.length}/${urls.length}`);
-      console.log(`📄 Enhanced metadata saved to: ${metadataPath}`);
-      
-      if (this.enableInteractiveCapture) {
-        const interactivePages = successful.filter(r => Array.isArray(r.data) && r.data.length > 1);
-        console.log(`🎯 Pages with interactive content: ${interactivePages.length}/${successful.length}`);
-      }
+      console.log(`🎯 Pages with interactive content: ${metadata.interactive_pages_found}/${successful.length}`);
       
       return {
-        success: failed.length === 0,
-        successful: successful,
-        failed: failed,
+        success: successful.length > 0,
+        successful: successful.map(r => r.data).flat(),
+        failed: failed.map(r => ({ url: r.url, error: r.error })),
         stats: {
-          total: urls.length,
-          successful: successful.length,
-          failed: failed.length,
-          totalScreenshots: totalScreenshots,
-          averageScreenshotsPerPage: parseFloat(metadata.average_screenshots_per_page),
-          duration: duration,
-          interactivePagesFound: this.enableInteractiveCapture ? 
-            successful.filter(r => Array.isArray(r.data) && r.data.length > 1).length : 0
+          totalScreenshots,
+          averageScreenshotsPerPage: metadata.average_screenshots_per_page,
+          interactivePagesFound: metadata.interactive_pages_found,
+          duration,
+          processingSpeed: (totalScreenshots/duration).toFixed(1)
         },
         files: {
-          metadata: metadataPath,
-          screenshotsDir: path.join(this.outputDir, 'desktop')
+          metadata: metadataPath
         }
       };
       
     } catch (error) {
-      console.error('❌ Enhanced screenshot service failed:', error);
-      return {
-        success: false,
-        error: error.message,
-        successful: [],
-        failed: [],
-        stats: {}
-      };
+      console.error('💥 Enhanced screenshot service failed:', error);
+      throw error;
     } finally {
       if (screenshotCapture) {
         await screenshotCapture.close();
-        console.log('🔒 Enhanced screenshot service cleanup completed');
       }
     }
   }
-
+  
   async processBatchConcurrent(urls, startIndex, screenshotCapture) {
-    const promises = urls.map((url, i) => 
-      this.captureWithRetry(screenshotCapture, url, startIndex + i)
-    );
+    const batchPromises = urls.map((url, batchIndex) => {
+      const globalIndex = startIndex + batchIndex;
+      return this.processSingleUrl(url, globalIndex, screenshotCapture);
+    });
     
-    const results = await Promise.allSettled(promises);
-    
-    return results.map((result, i) => ({
-      url: urls[i],
-      success: result.status === 'fulfilled',
-      data: result.status === 'fulfilled' ? result.value : null,
-      error: result.status === 'rejected' ? result.reason.message : null
-    }));
-  }
-
-  async captureWithRetry(screenshotCapture, url, index, maxRetries = 2) {
-    let lastError = null;
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        return await screenshotCapture.captureUrl(url, index);
-      } catch (error) {
-        lastError = error;
-        console.log(`  ⚠️  [${index}] Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
-        
-        if (attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    return await Promise.allSettled(batchPromises).then(results => 
+      results.map((result, index) => {
+        if (result.status === 'fulfilled') {
+          return { success: true, url: urls[index], data: result.value };
+        } else {
+          return { success: false, url: urls[index], error: result.reason.message };
         }
-      }
+      })
+    );
+  }
+  
+  async processSingleUrl(url, index, screenshotCapture) {
+    try {
+      const results = await screenshotCapture.captureUrl(url, index);
+      return results;
+    } catch (error) {
+      console.error(`❌ Failed to capture ${url}: ${error.message}`);
+      throw error;
     }
-    
-    throw lastError;
   }
 }
 
-// Enhanced createFilename function for multiple screenshots
-function createEnhancedFilename(url, index, screenshotIndex = null) {
-  try {
-    const urlObj = new URL(url);
-    
-    // Get domain without www
-    let domain = urlObj.hostname.replace(/^www\./, '');
-    
-    // Get pathname without leading/trailing slashes
-    let pathname = urlObj.pathname
-      .replace(/^\/+|\/+$/g, '') // Remove leading/trailing slashes
-      .replace(/\//g, '_')       // Replace slashes with underscores
-      .replace(/[^a-zA-Z0-9_-]/g, '') || 'index'; // Remove special chars
-    
-    // Truncate if too long
-    if (pathname.length > 30) {
-      pathname = pathname.substring(0, 30);
-    }
-    
-    // Create base filename
-    let filename = `${String(index + 1).padStart(3, '0')}_${domain}_${pathname}`;
-    
-    // Add screenshot index if multiple screenshots
-    if (screenshotIndex !== null) {
-      filename += `_${String(screenshotIndex + 1).padStart(2, '0')}`;
-    }
-    
-    filename += '.png';
-    
-    return filename;
-  } catch (error) {
-    // Fallback for invalid URLs
-    console.warn(`Error parsing URL ${url}:`, error.message);
-    const base = `${String(index + 1).padStart(3, '0')}_invalid_url`;
-    return screenshotIndex !== null ? `${base}_${String(screenshotIndex + 1).padStart(2, '0')}.png` : `${base}.png`;
-  }
+// Helper function to create enhanced filenames
+function createEnhancedFilename(url, urlIndex, screenshotIndex) {
+  const urlPart = new URL(url).hostname.replace(/[^a-zA-Z0-9]/g, '');
+  const paddedUrlIndex = String(urlIndex + 1).padStart(3, '0');
+  const paddedScreenshotIndex = String(screenshotIndex + 1).padStart(2, '0');
+  return `${paddedUrlIndex}_${urlPart}_index_${paddedScreenshotIndex}.png`;
 }
 
-module.exports = { 
-  EnhancedScreenshotService, 
-  EnhancedScreenshotCapture,
-  InteractiveContentCapture 
+module.exports = {
+  EnhancedScreenshotService,
+  EnhancedScreenshotCapture
 };
