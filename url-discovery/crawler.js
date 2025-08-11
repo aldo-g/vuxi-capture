@@ -132,6 +132,18 @@ class URLCrawler {
       
       const newLinks = await this.extractLinks(page, url);
       console.log(`  🔗 [${pageIndex}] Found ${newLinks.length} new links`);
+
+      // Optional interactive debugging / watching
+      if (process.env.PAUSE === '1') {
+        // Opens Playwright Inspector and pauses execution until you resume
+        await page.pause();
+      }
+
+      const watchMs = Number(process.env.WATCH_MS || 0);
+      if (watchMs > 0 && process.env.HEADFUL === '1') {
+        console.log(`  ⏱️  [${pageIndex}] WATCH_MS=${watchMs}ms - keeping page open to observe`);
+        await page.waitForTimeout(watchMs);
+      }
       
       this.stats.pagesCrawled++;
       return newLinks;
@@ -169,7 +181,9 @@ class URLCrawler {
   
   async crawl(startUrl) {
     const browser = await chromium.launch({
-      headless: true,
+      headless: process.env.HEADFUL !== '1',
+      slowMo: Number(process.env.SLOWMO || 0),
+      devtools: process.env.DEVTOOLS === '1',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -256,6 +270,20 @@ class URLCrawler {
       };
       
     } finally {
+      // Allow keeping the browser open in headful mode for debugging
+      if (process.env.HEADFUL === '1') {
+        const waitMs = Number(process.env.WAIT_BEFORE_CLOSE || 0);
+        if (waitMs > 0) {
+          console.log(`⏳ WAIT_BEFORE_CLOSE=${waitMs}ms — delaying browser close...`);
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
+        if (process.env.KEEP_OPEN === '1') {
+          console.log('🔒 KEEP_OPEN=1 — keeping the browser open. Press Ctrl+C to exit.');
+          // Keep process alive indefinitely until manually stopped
+          // eslint-disable-next-line no-unused-vars
+          await new Promise((_) => {});
+        }
+      }
       await browser.close();
     }
   }

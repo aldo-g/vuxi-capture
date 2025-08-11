@@ -12,19 +12,24 @@ class InteractiveContentCapture {
       skipSocialElements: options.skipSocialElements !== false,
       maxProcessingTime: options.maxProcessingTime || 120000,
 
-      // TAB CAPTURE
+      // Tab/section capture
       tabPostClickWait: options.tabPostClickWait || 1600,
       tabsFirst: options.tabsFirst !== false,
       forceScreenshotOnTabs: options.forceScreenshotOnTabs !== false,
       tabSectionAutoScroll: options.tabSectionAutoScroll !== false,
       tabSectionMinHeight: options.tabSectionMinHeight || 240,
 
-      // DEDUP
+      // Dedupe
       dedupeSimilarityThreshold: options.dedupeSimilarityThreshold || 99,
 
-      // OVERLAY/INCOMPLETE CONTENT GUARDRAILS
+      // Overlay/unfinished content guardrails
       avoidOverlayScreenshots: options.avoidOverlayScreenshots !== false,
-      overlayCoverageThreshold: options.overlayCoverageThreshold || 0.35, // 35% of viewport
+      overlayCoverageThreshold: options.overlayCoverageThreshold || 0.35,
+
+      // Region capture sizing
+      regionMinHeight: options.regionMinHeight || 420,
+      regionMaxHeight: options.regionMaxHeight || 1400,
+      regionPadding: options.regionPadding || 16,
 
       ...options
     };
@@ -32,285 +37,149 @@ class InteractiveContentCapture {
     this.screenshots = [];
     this.interactionHistory = new Map();
     this.discoveredElements = [];
-    this.pageState = {
-      domHash: null,
-      activeElements: new Set(),
-      expandedElements: new Set(),
-      visitedModals: new Set()
-    };
+    this.deduplicationReport = null;
   }
 
-  // ====== ENHANCED CONTENT VALIDATION ======
-
+  // ---------- validation ----------
   async validateContentLoaded() {
-    console.log('🔍 Validating content is fully loaded...');
-
     const validation = await this.page.evaluate(() => {
       const issues = [];
-
-      // 1) unloaded <img>
       const images = Array.from(document.querySelectorAll('img'));
-      const unloadedImages = images.filter(img => !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0);
-      if (unloadedImages.length > 0) {
-        issues.push({
-          type: 'unloaded_images',
-          count: unloadedImages.length,
-          selectors: unloadedImages.map(img => img.src || img.outerHTML.substring(0, 100)).slice(0, 5)
-        });
-      }
+      const unloadedImages = images.filter(i => !i.complete || i.naturalWidth === 0 || i.naturalHeight === 0);
+      if (unloadedImages.length) issues.push({ type: 'unloaded_images', count: unloadedImages.length });
 
-      // 2) skeletons/placeholders
-      const loadingElements = document.querySelectorAll(
+      const loading = document.querySelectorAll(
         '[class*="loading"], [class*="skeleton"], [class*="placeholder"], [class*="spinner"], [data-loading], .loading, .skeleton, .placeholder'
       );
-      if (loadingElements.length > 0) {
-        issues.push({
-          type: 'loading_placeholders',
-          count: loadingElements.length,
-          elements: Array.from(loadingElements).map(el => el.className || el.tagName).slice(0, 5)
-        });
-      }
+      if (loading.length) issues.push({ type: 'loading_placeholders', count: loading.length });
 
-      // 3) empty content areas
-      const contentAreas = document.querySelectorAll('main, [role="main"], .content, .main-content, article, section');
-      const emptyContentAreas = Array.from(contentAreas).filter(area => {
-        const text = area.textContent.trim();
-        const cntImgs = area.querySelectorAll('img').length;
-        const cntVids = area.querySelectorAll('video').length;
-        return text.length < 50 && cntImgs === 0 && cntVids === 0;
-      });
-      if (emptyContentAreas.length > 0) {
-        issues.push({ type: 'empty_content_areas', count: emptyContentAreas.length });
-      }
+      const areas = document.querySelectorAll('main, [role="main"], .content, .main-content, article, section');
+      const empties = Array.from(areas).filter(a => a.textContent.trim().length < 50 && a.querySelectorAll('img,video').length === 0);
+      if (empties.length) issues.push({ type: 'empty_content_areas', count: empties.length });
 
-      // 4) explicit errors
-      const errorElements = document.querySelectorAll(
-        '[class*="error"], [class*="failed"], [class*="404"], .error, .failed, .not-found, [data-error]'
-      );
-      if (errorElements.length > 0) {
-        issues.push({
-          type: 'error_elements',
-          count: errorElements.length,
-          messages: Array.from(errorElements).map(el => el.textContent.trim()).slice(0, 3)
-        });
-      }
+      const errors = document.querySelectorAll('[class*="error"], [class*="failed"], [class*="404"], .error, .failed, .not-found, [data-error]');
+      if (errors.length) issues.push({ type: 'error_elements', count: errors.length });
 
-      // 5) lazy hints
-      const lazyElements = document.querySelectorAll('[data-lazy], [loading="lazy"], [class*="lazy"]');
-      if (lazyElements.length > 0) {
-        issues.push({ type: 'lazy_elements', count: lazyElements.length });
-      }
+      const lazy = document.querySelectorAll('[data-lazy], [loading="lazy"], [class*="lazy"]');
+      if (lazy.length) issues.push({ type: 'lazy_elements', count: lazy.length });
 
       return {
         isValid: issues.length === 0,
         issues,
         stats: {
           totalImages: images.length,
-          loadedImages: images.length - unloadedImages.length,
-          contentAreas: contentAreas.length,
-          totalElements: document.querySelectorAll('*').length
+          loadedImages: images.length - unloadedImages.length
         }
       };
     });
 
     if (!validation.isValid) {
-      console.log('⚠️  Content validation issues found:', validation.issues);
       await this.attemptContentRecovery(validation.issues);
-      const revalidation = await this.page.evaluate(() => {
-        const images = Array.from(document.querySelectorAll('img'));
-        const unloadedImages = images.filter(img => !img.complete || img.naturalWidth === 0);
-        return { remainingIssues: unloadedImages.length, totalImages: images.length };
-      });
-      console.log(`🔍 After recovery: ${revalidation.remainingIssues}/${revalidation.totalImages} images still unloaded`);
-    } else {
-      console.log('✅ Content validation passed');
     }
-
     return validation;
   }
 
   async attemptContentRecovery(issues) {
-    console.log('🔧 Attempting content recovery...');
     for (const issue of issues) {
-      switch (issue.type) {
-        case 'unloaded_images':
-          console.log(`   🖼️  Attempting to reload ${issue.count} images...`);
-          await this.page.evaluate(() => {
-            const unloaded = Array.from(document.querySelectorAll('img')).filter(img => !img.complete || img.naturalWidth === 0);
-            unloaded.forEach(img => {
-              const src = img.src;
-              if (src) {
-                img.src = '';
-                setTimeout(() => (img.src = src), 100);
-              }
-            });
-          });
-          await this.page.waitForTimeout(2000);
-          await this.waitForImages();
-          break;
-
-        case 'loading_placeholders':
-          console.log('   ⏳ Waiting longer for loading placeholders...');
-          await this.page.waitForTimeout(3000);
-          break;
-
-        case 'lazy_elements':
-          console.log('   🔄 Re-triggering lazy loading...');
-          await this.triggerLazyLoading();
-          break;
+      if (issue.type === 'unloaded_images') {
+        await this.page.evaluate(() => {
+          const bad = Array.from(document.querySelectorAll('img')).filter(i => !i.complete || i.naturalWidth === 0);
+          bad.forEach(img => { const s = img.src; if (s) { img.src = ''; setTimeout(() => (img.src = s), 100); } });
+        });
+        await this.page.waitForTimeout(2000);
+        await this.waitForImages();
+      } else if (issue.type === 'loading_placeholders' || issue.type === 'lazy_elements') {
+        await this.triggerLazyLoading();
       }
     }
   }
 
   async shouldTakeScreenshot() {
-    const { score, issues } = await this.page.evaluate((opts) => {
-      const metrics = { score: 100, issues: [] };
+    const { score } = await this.page.evaluate((opts) => {
+      let score = 100;
 
-      // Image loading ratio
-      const images = Array.from(document.querySelectorAll('img'));
-      const unloaded = images.filter(img => !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0);
-      const ratio = images.length > 0 ? (images.length - unloaded.length) / images.length : 1;
-      if (ratio < 0.8 && images.length > 3) {
-        metrics.score -= 30;
-        metrics.issues.push(`${unloaded.length}/${images.length} images not loaded`);
-      }
+      const imgs = Array.from(document.querySelectorAll('img'));
+      const unloaded = imgs.filter(i => !i.complete || i.naturalWidth === 0 || i.naturalHeight === 0);
+      if (imgs.length > 3 && (imgs.length - unloaded.length) / imgs.length < 0.8) score -= 30;
 
-      // Loading/skeletons visible
       const loading = document.querySelectorAll('[class*="loading"], [class*="skeleton"], [class*="spinner"], [data-loading="true"], .loading, .skeleton');
-      if (loading.length > 0) {
-        metrics.score -= 20;
-        metrics.issues.push(`${loading.length} loading placeholders visible`);
-      }
+      if (loading.length) score -= 20;
 
-      // Overlay/backdrop coverage (avoid interim states)
       if (opts.avoidOverlayScreenshots) {
         const nodes = Array.from(document.querySelectorAll('body *'));
-        let area = 0;
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const viewport = vw * vh;
-
+        let covered = 0;
+        const vw = innerWidth, vh = innerHeight, viewport = vw * vh;
         for (const el of nodes) {
           const s = getComputedStyle(el);
-          if (!s) continue;
-          if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') continue;
+          if (!s || s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') continue;
           const pos = s.position;
           if (!(pos === 'fixed' || pos === 'absolute' || pos === 'sticky')) continue;
           const r = el.getBoundingClientRect();
           if (r.width < vw * 0.4 || r.height < vh * 0.3) continue;
-          const z = parseFloat(s.zIndex || '0');
+          const z = Number(s.zIndex || 0);
           if (z < 10) continue;
-          const hasBackdrop =
-            s.backdropFilter !== 'none' ||
-            /overlay|backdrop|modal|drawer/i.test(el.className || '') ||
-            (s.backgroundColor && s.backgroundColor !== 'rgba(0, 0, 0, 0)');
-          if (!hasBackdrop) continue;
-
-          area += Math.max(0, Math.min(r.width, vw) * Math.min(r.height, vh));
+          const backdrop = s.backdropFilter !== 'none' || /overlay|backdrop|modal|drawer/i.test(el.className || '') ||
+                           (s.backgroundColor && s.backgroundColor !== 'rgba(0, 0, 0, 0)');
+          if (!backdrop) continue;
+          covered += Math.min(r.width, vw) * Math.min(r.height, vh);
         }
-
-        const coverage = area / viewport;
-        if (coverage > opts.overlayCoverageThreshold) {
-          metrics.score -= 60;
-          metrics.issues.push(`Overlay covers ${(coverage * 100).toFixed(0)}% viewport`);
-        }
+        if (covered / viewport > opts.overlayCoverageThreshold) score -= 60;
       }
 
-      // Content density
-      if (document.body.textContent.trim().length < 100) {
-        metrics.score -= 25;
-        metrics.issues.push('Low content density');
-      }
+      if (document.body.textContent.trim().length < 100) score -= 25;
 
-      // Error states
-      const errors = document.querySelectorAll('[class*="error"], [class*="404"], [class*="failed"], .error, .not-found');
-      if (errors.length > 0) {
-        metrics.score -= 40;
-        metrics.issues.push('Error elements detected');
-      }
-
-      // Very few visible elements (likely blank)
       const visible = Array.from(document.querySelectorAll('*')).filter(el => {
-        const r = el.getBoundingClientRect();
-        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
       });
-      if (visible.length < 10) {
-        metrics.score -= 50;
-        metrics.issues.push('Very few visible elements');
-      }
+      if (visible.length < 10) score -= 50;
 
-      return metrics;
+      return { score };
     }, { avoidOverlayScreenshots: this.options.avoidOverlayScreenshots, overlayCoverageThreshold: this.options.overlayCoverageThreshold });
 
-    const shouldTake = score >= 70;
-    if (!shouldTake) {
-      console.log(`   ⚠️  Skipping screenshot - content quality score: ${score}/100`);
-      console.log(`   Issues: ${issues.join(', ')}`);
-    }
-    return shouldTake;
+    return score >= 70;
   }
-
-  // ====== LOAD / STABILITY ======
 
   async waitForCompletePageLoadWithValidation() {
-    console.log('🔄 Ensuring complete page load with validation...');
-    try {
-      await this.waitForCompletePageLoad();
-      const validation = await this.validateContentLoaded();
-      if (!validation.isValid) {
-        const critical = validation.issues.filter(i => i.type === 'unloaded_images' || i.type === 'empty_content_areas');
-        if (critical.length > 0) {
-          console.log('⚠️  Critical content issues detected, but proceeding with capture...');
-        }
-      }
-      console.log('✅ Page fully loaded and validated');
-    } catch (err) {
-      console.log(`⚠️  Page load/validation timeout, continuing anyway: ${err.message}`);
-    }
+    await this.waitForCompletePageLoad();
+    await this.validateContentLoaded();
   }
 
-  async takeScreenshotWithQualityCheck(filename, { force = false, tags = [] } = {}) {
+  async takeScreenshotWithQualityCheck(filename, { force = false, tags = [], clip = null } = {}) {
     try {
       if (!force) {
         const ok = await this.shouldTakeScreenshot();
-        if (!ok) {
-          console.log(`   ⏭️  Skipping screenshot: ${filename} - content not ready`);
-          return null;
-        }
+        if (!ok) return null;
       }
-      const buffer = await this.page.screenshot({ fullPage: true, type: 'png' });
+      const options = clip ? { type: 'png', fullPage: false, clip } : { type: 'png', fullPage: true };
+      const buffer = await this.page.screenshot(options);
       const data = { filename: `${filename}.png`, timestamp: new Date().toISOString(), size: buffer.length, buffer, tags };
       this.screenshots.push(data);
-      console.log(`   📸 Screenshot saved: ${filename}.png`);
+      console.log(`   📸 Screenshot saved: ${filename}.png${clip ? ' (region)' : ''}`);
       return data;
-    } catch (err) {
-      console.error(`Failed to take screenshot: ${err.message}`);
+    } catch (e) {
+      console.error(`Failed to take screenshot: ${e.message}`);
       return null;
     }
   }
 
-  // ====== DISCOVERY ======
-
+  // ---------- discovery ----------
   async discoverInteractiveElements() {
     const elements = await this.page.evaluate((options) => {
-      const discovered = [];
-      const seen = new Set();
+      const out = [], seen = new Set();
 
       const getSelector = (el) => {
         if (el.id) return `#${CSS.escape(el.id)}`;
         if (el.className && typeof el.className === 'string') {
-          const classes = el.className.trim().split(/\s+/).filter(c => c.length > 0 && /^[a-zA-Z_-]/.test(c)).slice(0, 2);
-          if (classes.length > 0) {
-            const esc = classes.map(c => CSS.escape(c)).join('.');
-            return `${el.tagName.toLowerCase()}.${esc}`;
-          }
+          const cls = el.className.trim().split(/\s+/).filter(c => c && /^[a-zA-Z_-]/.test(c)).slice(0, 2);
+          if (cls.length) return `${el.tagName.toLowerCase()}.${cls.map(CSS.escape).join('.')}`;
         }
-        const uid = 'interactive-' + Math.random().toString(36).slice(2, 11);
+        const uid = 'interactive-' + Math.random().toString(36).slice(2, 10);
         el.setAttribute('data-interactive-id', uid);
         return `[data-interactive-id="${uid}"]`;
       };
 
-      const isInteractive = (el) => {
+      const interactive = (el) => {
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) return false;
         const s = getComputedStyle(el);
@@ -318,100 +187,60 @@ class InteractiveContentCapture {
         return true;
       };
 
-      const textOf = (el) => (el.textContent || el.innerText || '').trim().toLowerCase();
+      const text = (el) => (el.textContent || el.innerText || '').trim().toLowerCase();
 
-      const shouldSkip = (el, text) => {
+      const skip = (el, t) => {
         if (!options.skipSocialElements) return false;
-        const patterns = ['facebook','twitter','instagram','linkedin','youtube','share','tweet','follow','subscribe','like','upvote','advertisement','sponsored','promo'];
+        const p = ['facebook','twitter','instagram','linkedin','youtube','share','tweet','follow','subscribe','like','upvote','advertisement','sponsored','promo'];
         const html = el.outerHTML.toLowerCase();
-        return patterns.some(p => text.includes(p) || html.includes(p));
+        return p.some(s => t.includes(s) || html.includes(s));
       };
 
-      const categories = [
-        { // tabs first
-          name: 'tabs',
-          priority: options.tabsFirst ? 98 : 85,
-          selectors: ['[role="tab"]', '.tab', '.tab-button', '[data-tab]'],
-          getSubtype: () => 'tab'
-        },
-        {
-          name: 'explicit',
-          priority: 96,
-          selectors: ['button', 'input[type="submit"]', 'input[type="button"]', '[role="button"]'],
-          getSubtype: (el) => {
-            const t = textOf(el);
-            if (t.includes('submit') || t.includes('send')) return 'submit';
-            if (t.includes('search')) return 'search';
-            if (t.includes('next') || t.includes('continue')) return 'navigation';
-            return 'button';
-          }
-        },
-        {
-          name: 'navigation',
-          priority: 95,
-          selectors: ['a[href]', 'nav a', '[role="link"]'],
-          getSubtype: (el) => {
-            if (el.closest('nav')) return 'nav-link';
-            if (el.href && el.href.includes('#')) return 'anchor-link';
-            return 'link';
-          }
-        },
-        { name: 'expandable', priority: 80, selectors: ['details','[aria-expanded]','.accordion','.collapsible','.expandable'], getSubtype: (el) => el.tagName === 'DETAILS' ? 'details' : (el.hasAttribute('aria-expanded') ? 'aria-expandable' : 'expandable') },
-        { name: 'forms', priority: 75, selectors: ['input:not([type="hidden"])','select','textarea'], getSubtype: (el) => el.type || el.tagName.toLowerCase() },
-        { name: 'modal-triggers', priority: 70, selectors: ['[data-toggle="modal"]','[data-modal]','.modal-trigger'], getSubtype: () => 'modal-trigger' },
-        { name: 'interactive-generic', priority: 60, selectors: ['[onclick]','[onmouseover]','[data-action]'], getSubtype: (el) => el.hasAttribute('onclick') ? 'onclick' : (el.hasAttribute('onmouseover') ? 'hover' : 'data-action') }
+      const cats = [
+        { name: 'tabs', priority: options.tabsFirst ? 98 : 85, selectors: ['[role="tab"]', '.tab', '.tab-button', '[data-tab]'], get: () => 'tab' },
+        { name: 'explicit', priority: 96, selectors: ['button','input[type="submit"]','input[type="button"]','[role="button"]'], get: el => {
+          const t = text(el);
+          if (t.includes('submit') || t.includes('send')) return 'submit';
+          if (t.includes('search')) return 'search';
+          if (t.includes('next') || t.includes('continue')) return 'navigation';
+          return 'button';
+        }},
+        { name: 'navigation', priority: 95, selectors: ['a[href]','nav a','[role="link"]'], get: el => el.closest('nav') ? 'nav-link' : (el.href && el.href.includes('#') ? 'anchor-link' : 'link') },
+        { name: 'expandable', priority: 80, selectors: ['details','[aria-expanded]','.accordion','.collapsible','.expandable'], get: el => el.tagName === 'DETAILS' ? 'details' : (el.hasAttribute('aria-expanded') ? 'aria-expandable' : 'expandable') },
+        { name: 'forms', priority: 75, selectors: ['input:not([type="hidden"])','select','textarea'], get: el => el.type || el.tagName.toLowerCase() },
+        { name: 'modal-triggers', priority: 70, selectors: ['[data-toggle="modal"]','[data-modal]','.modal-trigger'], get: () => 'modal-trigger' },
+        { name: 'interactive-generic', priority: 60, selectors: ['[onclick]','[onmouseover]','[data-action]'], get: el => el.hasAttribute('onclick') ? 'onclick' : (el.hasAttribute('onmouseover') ? 'hover' : 'data-action') }
       ];
 
-      categories.forEach(cat => {
-        cat.selectors.forEach(sel => {
-          try {
-            document.querySelectorAll(sel).forEach(el => {
-              if (!isInteractive(el)) return;
-              const text = textOf(el);
-              if (shouldSkip(el, text)) return;
-
-              const id = el.outerHTML;
-              if (seen.has(id)) return;
-              seen.add(id);
-
-              discovered.push({
-                selector: getSelector(el),
-                type: cat.name,
-                subtype: cat.getSubtype(el),
-                text: text.substring(0, 100),
-                priority: cat.priority,
-                rect: el.getBoundingClientRect(),
-                tagName: el.tagName,
-                hasText: text.length > 0,
-                isVisible: true,
-                attributes: {
-                  id: el.id || null,
-                  className: el.className || null,
-                  href: el.href || null,
-                  type: el.type || null
-                }
-              });
+      cats.forEach(c => c.selectors.forEach(sel => {
+        try {
+          document.querySelectorAll(sel).forEach(el => {
+            if (!interactive(el)) return;
+            const t = text(el);
+            if (skip(el, t)) return;
+            const id = el.outerHTML;
+            if (seen.has(id)) return;
+            seen.add(id);
+            out.push({
+              selector: getSelector(el),
+              type: c.name,
+              subtype: c.get(el),
+              text: t.substring(0, 100),
+              priority: c.priority
             });
-          } catch (e) {
-            console.warn(`Error processing selector ${sel}:`, e);
-          }
-        });
-      });
+          });
+        } catch {}
+      }));
 
-      return discovered.sort((a, b) => b.priority - a.priority).slice(0, options.maxInteractions);
+      return out.sort((a, b) => b.priority - a.priority).slice(0, options.maxInteractions);
     }, this.options);
 
     this.discoveredElements = elements;
-    console.log(`🎯 Discovered ${this.discoveredElements.length} interactive elements`);
-    const distribution = {};
-    this.discoveredElements.forEach(el => { distribution[el.type] = (distribution[el.type] || 0) + 1; });
-    console.log('📊 Element distribution:', distribution);
+    console.log(`🎯 Discovered ${elements.length} interactive elements`);
   }
 
-  // ====== CHANGE DETECTION ======
-
+  // ---------- change detection ----------
   async detectContentChanges(beforeState, elementData) {
-    // gather dynamic parts outside evaluate
     const url = await this.page.url();
     const selectedElementCount = await this.page.evaluate(() =>
       document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length
@@ -428,76 +257,50 @@ class InteractiveContentCapture {
     );
     const activeTabText = (elementData && (elementData.type === 'tabs' || elementData.isTabLike))
       ? await this.page.evaluate(() => {
-          const t = document.querySelector(
-            '[role="tab"][aria-selected="true"], .tab.active, .tab.selected, .tab-button.active, [aria-pressed="true"], [data-state="active"]'
-          );
+          const t = document.querySelector('[role="tab"][aria-selected="true"], .tab.active, .tab.selected, .tab-button.active, [aria-pressed="true"], [data-state="active"]');
           return t ? (t.textContent || '').trim().toLowerCase() : '';
         })
       : '';
 
-    const payload = { beforeState: { ...beforeState, url, selectedElementCount, hiddenElementCount, mainContentLength, modalCount, activeTabText }, elementData };
+    const payload = { beforeState: { ...beforeState, url, selectedElementCount, hiddenElementCount, mainContentLength, modalCount, activeTabText } };
 
-    return await this.page.evaluate(({ beforeState, elementData }) => {
-      const changes = {
-        significantChange: false,
-        domChanged: false,
-        textChanged: false,
-        urlChanged: false,
-        activeElementChanged: false,
-        visibilityChanged: false,
-        styleChanges: false,
-        newImages: [],
-        selectedTabChanged: false
-      };
+    return await this.page.evaluate(({ beforeState }) => {
+      const ch = { significantChange: false, domChanged: false, textChanged: false, urlChanged: false, activeElementChanged: false, visibilityChanged: false, styleChanges: false, newImages: [], selectedTabChanged: false };
 
-      if (window.location.href !== beforeState.url) { changes.urlChanged = true; changes.significantChange = true; }
+      if (location.href !== beforeState.url) { ch.urlChanged = true; ch.significantChange = true; }
 
-      const currentDomHash = document.documentElement.innerHTML.length;
-      if (Math.abs(currentDomHash - beforeState.domHash) > 50) { changes.domChanged = true; changes.significantChange = true; }
+      const domHash = document.documentElement.innerHTML.length;
+      if (Math.abs(domHash - beforeState.domHash) > 50) { ch.domChanged = true; ch.significantChange = true; }
 
       const visible = Array.from(document.querySelectorAll('*')).filter(el => {
-        const r = el.getBoundingClientRect();
-        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
       });
-      if (Math.abs(visible.length - beforeState.visibleElementCount) > 2) { changes.visibilityChanged = true; changes.significantChange = true; }
+      if (Math.abs(visible.length - beforeState.visibleElementCount) > 2) { ch.visibilityChanged = true; ch.significantChange = true; }
 
-      const selected = document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]');
-      if (selected.length !== beforeState.selectedElementCount) { changes.activeElementChanged = true; changes.significantChange = true; }
-
-      if (elementData && (elementData.type === 'tabs' || elementData.isTabLike)) {
-        const activeTab = document.querySelector('[role="tab"][aria-selected="true"], .tab.active, .tab.selected, .tab-button.active, [aria-pressed="true"], [data-state="active"]');
-        const activeText = activeTab ? (activeTab.textContent || '').trim().toLowerCase() : '';
-        if (activeText && activeText !== (beforeState.activeTabText || '')) {
-          changes.selectedTabChanged = true;
-          changes.significantChange = true;
-        }
-      }
+      const sel = document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]');
+      if (sel.length !== beforeState.selectedElementCount) { ch.activeElementChanged = true; ch.significantChange = true; }
 
       const imgs = document.querySelectorAll('img');
-      if (imgs.length > beforeState.imageCount) { changes.newImages = Array.from(imgs).slice(beforeState.imageCount); changes.significantChange = true; }
+      if (imgs.length > beforeState.imageCount) { ch.newImages = Array.from(imgs).slice(beforeState.imageCount); ch.significantChange = true; }
 
-      const currTextLength = document.body.textContent.length;
-      if (Math.abs(currTextLength - beforeState.textLength) > 50) { changes.textChanged = true; changes.significantChange = true; }
+      const txt = document.body.textContent.length;
+      if (Math.abs(txt - beforeState.textLength) > 50) { ch.textChanged = true; ch.significantChange = true; }
 
       const hidden = document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]');
-      if (Math.abs(hidden.length - beforeState.hiddenElementCount) > 1) { changes.styleChanges = true; changes.significantChange = true; }
+      if (Math.abs(hidden.length - beforeState.hiddenElementCount) > 1) { ch.styleChanges = true; ch.significantChange = true; }
 
       const main = document.querySelector('main, [role="main"], .main-content, #main, .content');
       if (main) {
-        const mainLen = main.textContent.length;
-        if (Math.abs(mainLen - (beforeState.mainContentLength || 0)) > 100) { changes.textChanged = true; changes.significantChange = true; }
+        const m = main.textContent.length;
+        if (Math.abs(m - (beforeState.mainContentLength || 0)) > 100) { ch.textChanged = true; ch.significantChange = true; }
       }
 
-      const modals = document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup');
-      if (modals.length > (beforeState.modalCount || 0)) { changes.significantChange = true; }
-
-      return changes;
+      return ch;
     }, payload);
   }
 
-  // ====== TAB HELPERS ======
-
+  // ---------- tab/anchor helpers ----------
   async waitForTabActivation(elementData) {
     if (!elementData) return;
     try {
@@ -507,67 +310,101 @@ class InteractiveContentCapture {
         const t = (el.textContent || '').trim().toLowerCase();
         const selected =
           (el.getAttribute && (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-pressed') === 'true' || el.getAttribute('data-state') === 'active')) ||
-          /(^|\\s)(active|selected)(\\s|$)/i.test(el.className || '');
+          /(^|\s)(active|selected)(\s|$)/i.test(el.className || '');
         const active = document.querySelector('[role="tab"][aria-selected="true"], .tab.active, .tab.selected, .tab-button.active, [aria-pressed="true"], [data-state="active"]');
         const activeText = active ? (active.textContent || '').trim().toLowerCase() : '';
         return selected || (activeText && activeText === t);
       }, elementData.selector, { timeout: this.options.changeDetectionTimeout });
-    } catch (_) { /* not fatal */ }
+    } catch {}
   }
 
-  async scrollToTabContent(elementData) {
-    if (!this.options.tabSectionAutoScroll) return;
-    try {
-      const targetY = await this.page.evaluate((selector, minH) => {
-        const el = document.querySelector(selector);
-        if (!el) return null;
+  async getAnchorTargetInfo(elementData) {
+    return await this.page.evaluate((selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      let id = null;
+      const href = el.getAttribute('href') || '';
+      if (href.startsWith('#') && href.length > 1) id = href.slice(1);
+      if (!id) id = el.getAttribute('data-target') || el.getAttribute('aria-controls') || null;
+      if (!id) return null;
+      const target = document.getElementById(id) || document.querySelector(`[name="${id}"]`) || document.querySelector(`#${CSS.escape(id)}`);
+      if (!target) return { id, y: null, rect: null };
+      const r = target.getBoundingClientRect();
+      return {
+        id,
+        y: Math.max(0, r.top + window.scrollY),
+        rect: { x: Math.max(0, r.left + window.scrollX), y: Math.max(0, r.top + window.scrollY), width: r.width, height: r.height }
+      };
+    }, elementData.selector);
+  }
+
+  async getTabPanelRect(elementData) {
+    return await this.page.evaluate((selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      let panel = null;
+      const ctrl = el.getAttribute('aria-controls');
+      if (ctrl) panel = document.getElementById(ctrl);
+      if (!panel) {
+        const candidates = Array.from(document.querySelectorAll('[role="tabpanel"]')).filter(n => {
+          const s = getComputedStyle(n), r = n.getBoundingClientRect();
+          return s.display !== 'none' && s.visibility !== 'hidden' && r.height > 160 && r.width > 200;
+        });
+        panel = candidates[0] || null;
+      }
+      if (!panel) {
+        // fallback: sizeable sibling below the tab group
         let node = el.closest('section, article, main, div') || el.parentElement;
         for (let i = 0; i < 5 && node; i++) {
           let sib = node.nextElementSibling;
           while (sib) {
-            const r = sib.getBoundingClientRect();
-            if (r.height > minH && r.width > 200) {
-              return Math.max(0, r.top + window.scrollY - 16);
-            }
+            const s = getComputedStyle(sib); const r = sib.getBoundingClientRect();
+            if (s.display !== 'none' && s.visibility !== 'hidden' && r.height > 160 && r.width > 200) { panel = sib; break; }
             sib = sib.nextElementSibling;
           }
+          if (panel) break;
           node = node.parentElement;
         }
-        const r = el.getBoundingClientRect();
-        return r.bottom + window.scrollY + 200;
-      }, elementData.selector, this.options.tabSectionMinHeight);
-
-      if (targetY !== null) {
-        await this.page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), targetY);
-        await this.page.waitForTimeout(200);
       }
-    } catch (_) {}
+      if (!panel) return null;
+      const r = panel.getBoundingClientRect();
+      return { x: Math.max(0, r.left + window.scrollX), y: Math.max(0, r.top + window.scrollY), width: r.width, height: r.height };
+    }, elementData.selector);
   }
 
-  // ====== INTERACTION ENGINE ======
+  async screenshotSectionRect(name, rect, extraTags = []) {
+    if (!rect) return null;
+    const viewport = await this.page.viewportSize();
+    const pad = this.options.regionPadding;
+    const clip = {
+      x: Math.max(0, Math.floor(rect.x) - pad),
+      y: Math.max(0, Math.floor(rect.y) - pad),
+      width: Math.floor(Math.min(viewport.width, rect.width + pad * 2)),
+      height: Math.floor(Math.min(this.options.regionMaxHeight, Math.max(this.options.regionMinHeight, rect.height + pad * 2)))
+    };
+    return await this.takeScreenshotWithQualityCheck(name, { force: true, clip, tags: extraTags });
+  }
 
+  // ---------- interaction engine ----------
   async interactWithElement(elementData, index) {
     try {
       console.log(`🎯 Interacting with element ${index + 1}/${this.discoveredElements.length}: ${elementData.type} - "${elementData.text.substring(0, 50)}"`);
 
-      // pre-classify: button-group behaving like tabs?
-      const preMeta = await this.page.evaluate((selector) => {
+      // classify tab-like
+      const isTabLike = await this.page.evaluate((selector) => {
         const el = document.querySelector(selector);
-        if (!el) return { isTabLike: false };
+        if (!el) return false;
         const group = el.closest('[role="tablist"], .tabs, .tablist, [data-tabgroup], .btn-group, .button-group');
         const siblings = group ? group.querySelectorAll('button, [role="tab"], a[role="tab"]').length : 0;
         const toggly = el.hasAttribute('aria-pressed') || el.getAttribute('data-state') === 'active';
-        return { isTabLike: !!group || siblings >= 2 || toggly };
+        return !!group || siblings >= 2 || toggly;
       }, elementData.selector);
-      const isTabLike = elementData.type === 'tabs' || preMeta.isTabLike;
-      elementData.isTabLike = isTabLike;
+      elementData.isTabLike = elementData.type === 'tabs' || isTabLike;
 
-      // before state
       const beforeState = await this.page.evaluate(() => ({
         domHash: document.documentElement.innerHTML.length,
         visibleElementCount: Array.from(document.querySelectorAll('*')).filter(el => {
-          const r = el.getBoundingClientRect();
-          return r.width > 0 && r.height > 0;
+          const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0;
         }).length,
         imageCount: document.querySelectorAll('img').length,
         textLength: document.body.textContent.length,
@@ -575,314 +412,206 @@ class InteractiveContentCapture {
         selectedElementCount: document.querySelectorAll('[aria-selected="true"], .active, .selected, [class*="active"], [class*="selected"]').length,
         hiddenElementCount: document.querySelectorAll('[style*="display: none"], [style*="visibility: hidden"]').length,
         mainContentLength: (() => {
-          const main = document.querySelector('main, [role="main"], .main-content, #main, .content');
-          return main ? main.textContent.length : 0;
+          const m = document.querySelector('main, [role="main"], .main-content, #main, .content');
+          return m ? m.textContent.length : 0;
         })(),
         modalCount: document.querySelectorAll('[role="dialog"], .modal, .overlay, .popup').length
       }));
 
       // click
-      const clicked = await this.page.evaluate((data) => {
+      const clickRes = await this.page.evaluate((selector) => {
         try {
-          const el = document.querySelector(data.selector);
+          const el = document.querySelector(selector);
           if (!el) return { success: false, reason: 'Element not found' };
           const r = el.getBoundingClientRect();
           if (r.width === 0 || r.height === 0) return { success: false, reason: 'Element not visible' };
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          setTimeout(() => {
-            if (el.tagName === 'DETAILS') {
-              el.open = !el.open;
-            } else if (el.hasAttribute('aria-expanded')) {
-              const expanded = el.getAttribute('aria-expanded') === 'true';
-              el.setAttribute('aria-expanded', (!expanded).toString());
-              el.click();
-            } else {
-              el.click();
-            }
-          }, 100);
-          return { success: true, action: 'click' };
-        } catch (e) {
-          return { success: false, reason: e.message };
-        }
-      }, { selector: elementData.selector, type: elementData.type });
+          setTimeout(() => el.click(), 100);
+          return { success: true };
+        } catch (e) { return { success: false, reason: e.message }; }
+      }, elementData.selector);
+      if (!clickRes.success) { console.log(`   ❌ Interaction failed: ${clickRes.reason}`); return null; }
 
-      if (!clicked.success) {
-        console.log(`   ❌ Interaction failed: ${clicked.reason}`);
-        return null;
-      }
-
-      // waits by type
       await this.page.waitForTimeout(this.options.interactionDelay);
 
-      if (elementData.type === 'explicit' && elementData.subtype === 'button' && !isTabLike) {
-        await this.page.waitForTimeout(1200);
-        try { await this.page.waitForLoadState('networkidle', { timeout: 5000 }); } catch { console.log('   ⚠️  Network idle timeout, continuing...'); }
-        await this.waitForImages();
-      } else if (elementData.type === 'expandable') {
-        await this.page.waitForTimeout(1000);
-        await this.waitForAnimations();
-      } else if (elementData.type === 'tabs' || isTabLike) {
+      // type-specific waits
+      if (elementData.isTabLike) {
         await this.waitForTabActivation(elementData);
         await this.page.waitForTimeout(this.options.tabPostClickWait);
-        await this.scrollToTabContent(elementData);
-        await this.waitForImages();
-        await this.waitForAnimations();
+      }
+      await this.waitForImages();
+      await this.waitForAnimations();
+
+      // detect anchor/tabpanel and region capture first (this avoids dedupe problems)
+      let regionShot = null;
+
+      // 1) anchor/section target by id
+      const anchorInfo = await this.getAnchorTargetInfo(elementData);
+      if (anchorInfo && anchorInfo.rect) {
+        regionShot = await this.screenshotSectionRect(`interaction_${index + 1}_anchor_${anchorInfo.id}`, anchorInfo.rect, ['anchor']);
       }
 
-      await this.page.waitForTimeout(500);
+      // 2) tab panel rect
+      if (!regionShot && elementData.isTabLike) {
+        const panelRect = await this.getTabPanelRect(elementData);
+        if (panelRect) {
+          regionShot = await this.screenshotSectionRect(`interaction_${index + 1}_tabpanel`, panelRect, ['tabs','tabpanel']);
+        }
+      }
 
-      // detect changes
+      // 3) fall back to full-page if no region panel/anchor found
       const changes = await this.detectContentChanges(beforeState, elementData);
-      const forceTabShot = (elementData.type === 'tabs' || isTabLike) && this.options.forceScreenshotOnTabs;
-
-      if (changes.significantChange || forceTabShot) {
-        console.log('   ✅ Content changed! Details:', {
-          domChanged: changes.domChanged,
-          textChanged: changes.textChanged,
-          urlChanged: changes.urlChanged,
-          activeElementChanged: changes.activeElementChanged,
-          visibilityChanged: changes.visibilityChanged,
-          styleChanges: changes.styleChanges,
-          selectedTabChanged: changes.selectedTabChanged
-        });
-
+      const forceTabShot = (elementData.isTabLike && this.options.forceScreenshotOnTabs);
+      if (!regionShot && (changes.significantChange || forceTabShot)) {
         const label = elementData.text ? elementData.text.substring(0, 15) : elementData.type;
-        const nameSafe = label.replace(/[^a-zA-Z0-9]/g, '_') || elementData.type;
-        const tags = [ (isTabLike ? 'tabs' : elementData.type), elementData.subtype || '', elementData.text || '' ].filter(Boolean);
-
-        const shot = await this.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${nameSafe}`, { force: forceTabShot, tags });
-        this.interactionHistory.set(elementData.selector, { elementData, interactionResult: clicked, changes, screenshot: shot, timestamp: Date.now() });
-
-        if (elementData.type === 'tabs' || isTabLike) await this.page.waitForTimeout(800);
-        return shot;
-      } else {
-        console.log('   ℹ️  No significant changes detected');
-        return null;
+        const safe = label.replace(/[^a-zA-Z0-9]/g, '_') || elementData.type;
+        await this.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${safe}`, { force: forceTabShot, tags: [elementData.isTabLike ? 'tabs' : elementData.type] });
       }
-    } catch (error) {
-      console.log(`   ❌ Error interacting with element: ${error.message}`);
+
+      return true;
+    } catch (e) {
+      console.log(`   ❌ Error interacting with element: ${e.message}`);
       return null;
     }
   }
 
-  // ====== PAGE LOAD HELPERS ======
-
+  // ---------- page-load helpers ----------
   async waitForCompletePageLoad() {
-    console.log('🔄 Ensuring complete page load...');
     try {
-      console.log('   📡 Waiting for network idle...');
       await this.page.waitForLoadState('networkidle', { timeout: 10000 });
-
-      console.log('   🌐 Waiting for DOM content loaded...');
       await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 });
-
-      console.log('   🖼️  Waiting for images to load...');
       await this.waitForImages();
-
-      console.log('   📝 Waiting for fonts to load...');
       await this.waitForFonts();
-
-      console.log('   ✨ Waiting for animations to settle...');
       await this.waitForAnimations();
-
-      console.log('   🔄 Triggering lazy-loaded content...');
       await this.triggerLazyLoading();
-
-      console.log('   ⚖️  Performing stability check...');
       await this.waitForPageStability();
-
-      console.log('✅ Page fully loaded and stable');
-    } catch (err) {
-      console.log(`⚠️  Page load timeout, continuing anyway: ${err.message}`);
-    }
+    } catch {}
   }
 
   async waitForImages() {
     return await this.page.evaluate(async () => {
       const imgs = Array.from(document.querySelectorAll('img'));
-      if (imgs.length === 0) return;
-      const promises = imgs.map(img => new Promise((resolve) => {
-        if (img.complete) return resolve();
-        img.addEventListener('load', resolve, { once: true });
-        img.addEventListener('error', resolve, { once: true });
-        setTimeout(resolve, 5000);
-      }));
-      await Promise.all(promises);
-      console.log(`   ✅ ${imgs.length} images loaded`);
+      if (!imgs.length) return;
+      await Promise.all(imgs.map(img => new Promise(res => {
+        if (img.complete) return res();
+        img.addEventListener('load', res, { once: true });
+        img.addEventListener('error', res, { once: true });
+        setTimeout(res, 5000);
+      })));
     });
   }
 
   async waitForFonts() {
     return await this.page.evaluate(async () => {
-      if ('fonts' in document) {
-        try { await document.fonts.ready; console.log('   ✅ Fonts loaded'); }
-        catch { console.log('   ⚠️  Font loading timeout'); }
-      }
+      if (document.fonts) { try { await document.fonts.ready; } catch {} }
     });
   }
 
   async waitForAnimations() {
     await this.page.evaluate(async () => {
-      const animated = Array.from(document.querySelectorAll('*')).filter(el => {
+      const els = Array.from(document.querySelectorAll('*')).filter(el => {
         const s = getComputedStyle(el);
         return s.animationName !== 'none' || s.transitionProperty !== 'none';
       });
-      if (animated.length > 0) {
-        const promises = animated.map(el => new Promise(resolve => {
-          const done = () => { el.removeEventListener('animationend', done); el.removeEventListener('transitionend', done); resolve(); };
+      if (!els.length) return;
+      await Promise.race([
+        Promise.all(els.map(el => new Promise(res => {
+          const done = () => { el.removeEventListener('animationend', done); el.removeEventListener('transitionend', done); res(); };
           el.addEventListener('animationend', done, { once: true });
           el.addEventListener('transitionend', done, { once: true });
-          setTimeout(resolve, 3000);
-        }));
-        await Promise.race([ Promise.all(promises), new Promise(r => setTimeout(r, 3000)) ]);
-      }
+          setTimeout(res, 3000);
+        }))),
+        new Promise(res => setTimeout(res, 3000))
+      ]);
     });
-    await this.page.waitForTimeout(500);
+    await this.page.waitForTimeout(200);
   }
 
   async triggerLazyLoading() {
     const pageHeight = await this.page.evaluate(() => document.body.scrollHeight);
-    const viewportHeight = await this.page.evaluate(() => window.innerHeight);
-    let pos = 0;
-    const step = viewportHeight * 0.8;
-    while (pos < pageHeight) {
-      await this.page.evaluate(y => window.scrollTo(0, y), pos);
-      await this.page.waitForTimeout(300);
-      pos += step;
+    const vh = await this.page.evaluate(() => window.innerHeight);
+    let y = 0, step = Math.floor(vh * 0.8);
+    while (y < pageHeight) {
+      await this.page.evaluate((yy) => window.scrollTo(0, yy), y);
+      await this.page.waitForTimeout(250);
+      y += step;
     }
     await this.page.evaluate(() => window.scrollTo(0, 0));
-    await this.page.waitForTimeout(500);
+    await this.page.waitForTimeout(300);
     await this.waitForImages();
   }
 
   async waitForPageStability() {
-    let prev = '';
-    let stable = 0;
+    let prev = ''; let stable = 0;
     for (let i = 0; i < 10; i++) {
-      const curr = await this.page.evaluate(() => {
-        const visible = Array.from(document.querySelectorAll('*')).filter(el => {
-          const r = el.getBoundingClientRect();
-          return r.width > 0 && r.height > 0;
+      const sig = await this.page.evaluate(() => {
+        const vis = Array.from(document.querySelectorAll('*')).filter(el => {
+          const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0;
         });
-        return visible.length + '_' + document.body.textContent.length;
+        return vis.length + '_' + document.body.textContent.length;
       });
-      if (curr === prev) { stable++; if (stable >= 3) { console.log('   ✅ Page content stable'); break; } }
-      else { stable = 0; }
-      prev = curr;
-      await this.page.waitForTimeout(500);
+      if (sig === prev) { stable++; if (stable >= 3) break; } else { stable = 0; }
+      prev = sig;
+      await this.page.waitForTimeout(300);
     }
   }
 
-  // legacy method
-  async takeScreenshot(filename) {
-    try {
-      const buffer = await this.page.screenshot({ fullPage: true, type: 'png' });
-      const data = { filename: `${filename}.png`, timestamp: new Date().toISOString(), size: buffer.length, buffer };
-      this.screenshots.push(data);
-      console.log(`   📸 Screenshot saved: ${filename}.png`);
-      return data;
-    } catch (err) {
-      console.error(`Failed to take screenshot: ${err.message}`);
-      return null;
-    }
-  }
-
-  // ====== MAIN ======
-
+  // ---------- main ----------
   async captureInteractiveContent() {
     console.log('🚀 Starting interactive content capture...');
-
     try {
-      console.log('⏳ Waiting for complete page load with validation...');
       await this.waitForCompletePageLoadWithValidation();
 
-      console.log('📸 Taking baseline screenshot...');
       await this.takeScreenshotWithQualityCheck('00_baseline');
 
-      console.log('🔍 Discovering interactive elements...');
       await this.discoverInteractiveElements();
-      if (this.discoveredElements.length === 0) {
-        console.log('ℹ️  No interactive elements found');
-        return this.screenshots;
+      if (!this.discoveredElements.length) return this.screenshots;
+
+      const max = Math.min(this.discoveredElements.length, this.options.maxInteractions);
+      for (let i = 0; i < max; i++) {
+        if (this.screenshots.length >= this.options.maxScreenshots) break;
+        await this.interactWithElement(this.discoveredElements[i], i);
+        if (i < max - 1) await this.page.waitForTimeout(200);
       }
 
-      const maxInteractions = Math.min(this.discoveredElements.length, this.options.maxInteractions);
-      console.log(`🎯 Processing top ${maxInteractions} interactive elements...`);
+      if (this.screenshots.length < 3) await this.takeScreenshotWithQualityCheck('99_final');
 
-      for (let i = 0; i < maxInteractions; i++) {
-        if (this.screenshots.length >= this.options.maxScreenshots) {
-          console.log(`📸 Reached screenshot limit (${this.options.maxScreenshots})`);
-          break;
-        }
-        const element = this.discoveredElements[i];
-        await this.interactWithElement(element, i);
-        if (i < maxInteractions - 1) await this.page.waitForTimeout(200);
-      }
-
-      if (this.screenshots.length < 3) {
-        console.log('📸 Taking final comprehensive screenshot...');
-        await this.takeScreenshotWithQualityCheck('99_final');
-      }
-
-      console.log(`✅ Capture complete! Generated ${this.screenshots.length} screenshots from ${this.interactionHistory.size} successful interactions`);
-
-      // DEDUP — but keep TAB shots no matter what
-      console.log('🔍 Running image deduplication...');
+      // DEDUPE — always keep anchor/tab-panel shots
       const { ImageDeduplicationService } = require('./image-deduplication');
-      const dedup = new ImageDeduplicationService({
+      const dd = new ImageDeduplicationService({
         similarityThreshold: this.options.dedupeSimilarityThreshold,
         keepHighestQuality: true,
         preserveFirst: true,
         verbose: true
       });
-
-      let unique = await dedup.processScreenshots(this.screenshots);
-
-      // Ensure we never drop any tab screenshots
-      const tabShots = this.screenshots.filter(s => (s.tags || []).includes('tabs'));
+      let unique = await dd.processScreenshots(this.screenshots);
+      const keepTags = new Set(['anchor', 'tabpanel', 'tabs']);
       const names = new Set(unique.map(u => u.filename));
-      tabShots.forEach(s => {
-        if (!names.has(s.filename)) {
-          console.log(`   ➕ Re-inserting tab screenshot removed by dedupe: ${s.filename}`);
+      this.screenshots.forEach(s => {
+        const tags = new Set(s.tags || []);
+        if ([...tags].some(t => keepTags.has(t)) && !names.has(s.filename)) {
           unique.push(s);
+          names.add(s.filename);
         }
       });
-
       this.screenshots = unique;
-      this.deduplicationReport = dedup.getDeduplicationReport();
+      this.deduplicationReport = dd.getDeduplicationReport();
 
-      console.log(`🎉 Final result: ${this.screenshots.length} unique screenshots ready!`);
+      console.log(`🎉 Final: ${this.screenshots.length} unique screenshots`);
       return this.screenshots;
-
-    } catch (err) {
-      console.error(`❌ Interactive capture failed: ${err.message}`);
+    } catch (e) {
+      console.error(`❌ Interactive capture failed: ${e.message}`);
       return this.screenshots;
     }
   }
 
-  // ====== REPORT ======
-
+  // ---------- report ----------
   getCaptureReport() {
-    const report = {
+    const r = {
       totalScreenshots: this.screenshots.length,
-      totalInteractions: this.interactionHistory.size,
-      discoveredElements: this.discoveredElements.length,
-      successfulInteractions: Array.from(this.interactionHistory.values()).filter(h => h.screenshot).length,
-      elementTypes: {},
-      interactionTypes: {},
       deduplication: this.deduplicationReport || null
     };
-
-    this.discoveredElements.forEach(el => {
-      report.elementTypes[el.type] = (report.elementTypes[el.type] || 0) + 1;
-    });
-
-    Array.from(this.interactionHistory.values()).forEach(interaction => {
-      const t = interaction.elementData.type;
-      report.interactionTypes[t] = (report.interactionTypes[t] || 0) + 1;
-    });
-
-    return report;
+    return r;
   }
 }
 
