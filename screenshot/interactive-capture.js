@@ -38,6 +38,59 @@ class InteractiveContentCapture {
     this.interactionHistory = new Map();
     this.discoveredElements = [];
     this.deduplicationReport = null;
+    this.currentPageDomain = null;
+  }
+
+  // ---------- external link protection ----------
+  async setupExternalLinkProtection() {
+    // Get the current page domain
+    const currentUrl = this.page.url();
+    this.currentPageDomain = new URL(currentUrl).hostname.toLowerCase().replace(/^www\./, '');
+    
+    console.log(`🛡️  Setting up external link protection for domain: ${this.currentPageDomain}`);
+
+    // Block external navigation attempts
+    await this.page.route('**/*', (route, request) => {
+      const url = request.url();
+      
+      try {
+        const requestDomain = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+        
+        // Block navigation to external domains (but allow resources like images)
+        if (requestDomain !== this.currentPageDomain && request.isNavigationRequest()) {
+          console.log(`🚫 BLOCKED external navigation to: ${url}`);
+          route.abort();
+          return;
+        }
+      } catch (e) {
+        // If URL parsing fails, allow it (might be relative URL)
+      }
+      
+      route.continue();
+    });
+  }
+
+  async isExternalLink(selector) {
+    return await this.page.evaluate((sel, currentDomain) => {
+      const element = document.querySelector(sel);
+      if (!element || element.tagName !== 'A') return false;
+      
+      const href = element.href;
+      if (!href) return false;
+      
+      try {
+        const linkDomain = new URL(href).hostname.toLowerCase().replace(/^www\./, '');
+        const isExternal = linkDomain !== currentDomain;
+        
+        if (isExternal) {
+          console.log(`🚫 Detected external link: ${href} (domain: ${linkDomain}) - will skip`);
+        }
+        
+        return isExternal;
+      } catch (e) {
+        return true; // If can't parse URL, assume external
+      }
+    }, selector, this.currentPageDomain);
   }
 
   // ---------- validation ----------
@@ -165,7 +218,8 @@ class InteractiveContentCapture {
 
   // ---------- discovery ----------
   async discoverInteractiveElements() {
-    const elements = await this.page.evaluate((options) => {
+    const elements = await this.page.evaluate((args) => {
+      const { options, currentDomain } = args;
       const out = [], seen = new Set();
 
       const getSelector = (el) => {
@@ -205,7 +259,22 @@ class InteractiveContentCapture {
           if (t.includes('next') || t.includes('continue')) return 'navigation';
           return 'button';
         }},
-        { name: 'navigation', priority: 95, selectors: ['a[href]','nav a','[role="link"]'], get: el => el.closest('nav') ? 'nav-link' : (el.href && el.href.includes('#') ? 'anchor-link' : 'link') },
+        // MODIFIED: Filter navigation links to only include internal links
+        { name: 'navigation', priority: 95, selectors: ['a[href]','nav a','[role="link"]'], get: el => {
+          // Check if it's an external link
+          if (el.tagName === 'A' && el.href) {
+            try {
+              const linkDomain = new URL(el.href).hostname.toLowerCase().replace(/^www\./, '');
+              if (linkDomain !== currentDomain) {
+                console.log(`🚫 Skipping external link during discovery: ${el.href}`);
+                return null; // Skip external links
+              }
+            } catch (e) {
+              return null; // Skip malformed URLs
+            }
+          }
+          return el.closest('nav') ? 'nav-link' : (el.href && el.href.includes('#') ? 'anchor-link' : 'link');
+        }},
         { name: 'expandable', priority: 80, selectors: ['details','[aria-expanded]','.accordion','.collapsible','.expandable'], get: el => el.tagName === 'DETAILS' ? 'details' : (el.hasAttribute('aria-expanded') ? 'aria-expandable' : 'expandable') },
         { name: 'forms', priority: 75, selectors: ['input:not([type="hidden"])','select','textarea'], get: el => el.type || el.tagName.toLowerCase() },
         { name: 'modal-triggers', priority: 70, selectors: ['[data-toggle="modal"]','[data-modal]','.modal-trigger'], get: () => 'modal-trigger' },
@@ -218,13 +287,17 @@ class InteractiveContentCapture {
             if (!interactive(el)) return;
             const t = text(el);
             if (skip(el, t)) return;
+            
+            const elementType = c.get(el);
+            if (!elementType) return; // Skip if get() returned null (external links)
+            
             const id = el.outerHTML;
             if (seen.has(id)) return;
             seen.add(id);
             out.push({
               selector: getSelector(el),
               type: c.name,
-              subtype: c.get(el),
+              subtype: elementType,
               text: t.substring(0, 100),
               priority: c.priority
             });
@@ -233,10 +306,24 @@ class InteractiveContentCapture {
       }));
 
       return out.sort((a, b) => b.priority - a.priority).slice(0, options.maxInteractions);
-    }, this.options);
+    }, { options: this.options, currentDomain: this.currentPageDomain });
 
-    this.discoveredElements = elements;
-    console.log(`🎯 Discovered ${elements.length} interactive elements`);
+    // Additional server-side filtering for extra safety
+    const filteredElements = [];
+    for (const element of elements) {
+      // Double-check links on the server side
+      if (element.type === 'navigation' && element.selector) {
+        const isExternal = await this.isExternalLink(element.selector);
+        if (isExternal) {
+          console.log(`🚫 Server-side filtered external link: ${element.selector}`);
+          continue;
+        }
+      }
+      filteredElements.push(element);
+    }
+
+    this.discoveredElements = filteredElements;
+    console.log(`🎯 Discovered ${this.discoveredElements.length} interactive elements (external links filtered)`);
   }
 
   // ---------- change detection ----------
@@ -389,6 +476,15 @@ class InteractiveContentCapture {
   async interactWithElement(elementData, index) {
     try {
       console.log(`🎯 Interacting with element ${index + 1}/${this.discoveredElements.length}: ${elementData.type} - "${elementData.text.substring(0, 50)}"`);
+
+      // ADDITIONAL CHECK: Skip external links at interaction time
+      if (elementData.type === 'navigation' && elementData.selector) {
+        const isExternal = await this.isExternalLink(elementData.selector);
+        if (isExternal) {
+          console.log(`🚫 Skipping external link interaction: ${elementData.selector}`);
+          return null;
+        }
+      }
 
       // classify tab-like
       const isTabLike = await this.page.evaluate((selector) => {
@@ -560,6 +656,9 @@ class InteractiveContentCapture {
   async captureInteractiveContent() {
     console.log('🚀 Starting interactive content capture...');
     try {
+      // Setup external link protection first
+      await this.setupExternalLinkProtection();
+      
       await this.waitForCompletePageLoadWithValidation();
 
       await this.takeScreenshotWithQualityCheck('00_baseline');
