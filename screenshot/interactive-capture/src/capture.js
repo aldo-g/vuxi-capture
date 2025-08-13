@@ -87,6 +87,9 @@ class InteractiveContentCapture {
       // Take baseline screenshot
       await this.screenshotter.takeScreenshotWithQualityCheck('00_baseline');
 
+      // IMPORTANT: Capture baseline state after page is fully loaded
+      await this.interactor.captureBaselineState();
+
       let discoveryRound = 0;
       let consecutiveEmptyRounds = 0;
       const maxEmptyRounds = 2; // Stop if we have 2 consecutive rounds with no new elements
@@ -132,16 +135,23 @@ class InteractiveContentCapture {
           
           console.log(`   📍 Element ${i + 1}/${elementsToProcess}: ${element.type} - "${element.text}"`);
           
-          // Interact with the element
+          // Ensure baseline state before each interaction (except the first one)
+          if (this.interactor.baselineState && i > 0) {
+            await this.interactor.restoreToBaselineState();
+            await this.page.waitForTimeout(300);
+          }
+          
+          // Interact with the element (state restoration is handled within interactWithElement)
           const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
           this.totalInteractions++;
 
           // Check if this interaction caused significant changes that might reveal new elements
-          if (interactionResult) {
+          if (interactionResult && interactionResult.success) {
             // Wait for any animations or dynamic content to settle
             await this.page.waitForTimeout(500);
             
-            // Check for immediate new content (e.g., dropdowns, modals)
+            // Only check for immediate new content if we're still in baseline state
+            // (since we restore after each interaction)
             const immediateNewElements = await this._discoverNewElements();
             if (immediateNewElements.length > 0) {
               console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after interaction`);
@@ -226,6 +236,11 @@ class InteractiveContentCapture {
     this.totalInteractions = 0;
     this.maxInteractionsReached = false;
     this.screenshotter.screenshots = [];
+    
+    // Reset baseline state in interactor
+    if (this.interactor) {
+      this.interactor.baselineState = null;
+    }
   }
 
   // Enhanced reporting method for backward compatibility
@@ -237,7 +252,8 @@ class InteractiveContentCapture {
       discoveredElements: this.discoveredElements.length,
       deduplication: this.deduplicationReport || null,
       interactionHistory: Array.from(this.interactionHistory.entries()),
-      elementSignatures: Array.from(this.processedElementSignatures)
+      elementSignatures: Array.from(this.processedElementSignatures),
+      baselineStateRestored: !!this.interactor.baselineState
     };
   }
 }
