@@ -13,11 +13,78 @@ class ElementDiscovery {
       const out = [], seen = new Set();
 
       const getSelector = (el) => {
+        // Strategy 1: Use ID if available
         if (el.id) return `#${CSS.escape(el.id)}`;
-        if (el.className && typeof el.className === 'string') {
-          const cls = el.className.trim().split(/\s+/).filter(c => c && /^[a-zA-Z_-]/.test(c)).slice(0, 2);
-          if (cls.length) return `${el.tagName.toLowerCase()}.${cls.map(CSS.escape).join('.')}`;
+        
+        // Strategy 2: Use text content for buttons to make them unique
+        if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
+          const textContent = (el.textContent || '').trim();
+          if (textContent) {
+            // Try to create a selector that includes the text content
+            const escapedText = textContent.replace(/[^\w\s]/g, '').toLowerCase();
+            if (escapedText) {
+              // Use a combination of tag and text content
+              const textSelector = `button:contains("${textContent}")`;
+              // Since :contains() isn't standard CSS, we'll use a more robust approach
+              const buttonWithText = `button[data-button-text="${escapedText}"]`;
+              // Set a temporary attribute for better selection
+              el.setAttribute('data-button-text', escapedText);
+              return buttonWithText;
+            }
+          }
         }
+
+        // Strategy 3: Use classes but be more specific
+        if (el.className && typeof el.className === 'string') {
+          const classes = el.className.trim().split(/\s+/).filter(c => c && /^[a-zA-Z_-]/.test(c));
+          if (classes.length) {
+            // For buttons with similar classes, try to find distinguishing classes
+            const distinctiveClasses = classes.filter(cls => 
+              !['relative', 'z-10', 'px-6', 'py-3', 'text-base', 'rounded-full', 'transition-all', 'duration-300', 'active:scale-95', 'select-none', 'whitespace-nowrap'].includes(cls)
+            );
+            
+            if (distinctiveClasses.length > 0) {
+              return `${el.tagName.toLowerCase()}.${distinctiveClasses.slice(0, 3).map(CSS.escape).join('.')}`;
+            } else {
+              // Fall back to using more classes for specificity
+              return `${el.tagName.toLowerCase()}.${classes.slice(0, 4).map(CSS.escape).join('.')}`;
+            }
+          }
+        }
+
+        // Strategy 4: Use position-based selector for similar elements
+        const parent = el.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter(child => 
+            child.tagName === el.tagName && 
+            child.className === el.className
+          );
+          
+          if (siblings.length > 1) {
+            const index = siblings.indexOf(el);
+            if (index >= 0) {
+              // Create a more specific selector using nth-child
+              const parentSelector = parent.id ? `#${CSS.escape(parent.id)}` : 
+                                   parent.className ? `.${parent.className.split(/\s+/)[0]}` : 
+                                   parent.tagName.toLowerCase();
+              return `${parentSelector} > ${el.tagName.toLowerCase()}:nth-child(${index + 1})`;
+            }
+          }
+        }
+
+        // Strategy 5: Use aria attributes or data attributes
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel) {
+          return `[aria-label="${ariaLabel}"]`;
+        }
+
+        const dataAttrs = Array.from(el.attributes).filter(attr => attr.name.startsWith('data-'));
+        if (dataAttrs.length > 0) {
+          const dataAttr = dataAttrs[0];
+          return `[${dataAttr.name}="${dataAttr.value}"]`;
+        }
+
+        // Strategy 6: Create unique identifier as last resort
         const uid = 'interactive-' + Math.random().toString(36).slice(2, 10);
         el.setAttribute('data-interactive-id', uid);
         return `[data-interactive-id="${uid}"]`;
@@ -67,6 +134,9 @@ class ElementDiscovery {
         { name: 'interactive-generic', priority: 60, selectors: ['[onclick]','[onmouseover]','[data-action]'], get: el => el.hasAttribute('onclick') ? 'onclick' : (el.hasAttribute('onmouseover') ? 'hover' : 'data-action') }
       ];
 
+      // Create a map to track elements by their text content to ensure uniqueness
+      const elementsByText = new Map();
+
       cats.forEach(c => c.selectors.forEach(sel => {
         try {
           document.querySelectorAll(sel).forEach(el => {
@@ -77,21 +147,68 @@ class ElementDiscovery {
             const elementType = c.get(el);
             if (!elementType) return;
 
-            const id = el.outerHTML;
-            if (seen.has(id)) return;
-            seen.add(id);
+            // Use a combination of element properties for uniqueness check
+            const uniqueKey = `${el.tagName}_${el.className}_${t}_${el.getAttribute('aria-label') || ''}_${el.outerHTML.slice(0, 200)}`;
+            if (seen.has(uniqueKey)) return;
+            seen.add(uniqueKey);
+
+            // For buttons with text, ensure we don't have duplicates
+            if (c.name === 'explicit' && t) {
+              if (elementsByText.has(t)) {
+                // If we already have a button with this text, skip it
+                console.log(`🔄 Skipping duplicate button with text: "${t}"`);
+                return;
+              }
+              elementsByText.set(t, el);
+            }
+
+            const selector = getSelector(el);
+            
+            // Validate the selector works and is unique
+            try {
+              const testElements = document.querySelectorAll(selector);
+              if (testElements.length !== 1 || testElements[0] !== el) {
+                console.log(`⚠️ Selector not unique for element with text "${t}": ${selector}`);
+                // Try to make it more specific
+                const moreSpecificSelector = el.getAttribute('data-interactive-id') ? 
+                  `[data-interactive-id="${el.getAttribute('data-interactive-id')}"]` : 
+                  getSelector(el);
+                
+                const retest = document.querySelectorAll(moreSpecificSelector);
+                if (retest.length === 1 && retest[0] === el) {
+                  console.log(`✅ Fixed selector for "${t}": ${moreSpecificSelector}`);
+                  out.push({
+                    selector: moreSpecificSelector,
+                    type: c.name,
+                    subtype: elementType,
+                    text: t.substring(0, 100),
+                    priority: c.priority
+                  });
+                  return;
+                }
+              }
+            } catch (e) {
+              console.log(`❌ Selector validation failed for "${t}": ${e.message}`);
+            }
+
             out.push({
-              selector: getSelector(el),
+              selector: selector,
               type: c.name,
               subtype: elementType,
               text: t.substring(0, 100),
               priority: c.priority
             });
           });
-        } catch (_) {}
+        } catch (e) {
+          console.log(`❌ Error processing selector ${sel}: ${e.message}`);
+        }
       }));
 
-      return out.sort((a, b) => b.priority - a.priority).slice(0, options.maxInteractions);
+      // Sort by priority and then by text content to ensure consistent ordering
+      return out.sort((a, b) => {
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        return (a.text || '').localeCompare(b.text || '');
+      }).slice(0, options.maxInteractions);
     }, { options: this.options, currentDomain: this.env.currentDomain });
 
     const filtered = [];
@@ -102,6 +219,13 @@ class ElementDiscovery {
       }
       filtered.push(el);
     }
+    
+    // Log the discovered elements for debugging
+    console.log('🔍 Discovered elements:');
+    filtered.forEach((el, index) => {
+      console.log(`  ${index + 1}. Type: ${el.type}, Text: "${el.text}", Selector: ${el.selector}`);
+    });
+    
     return filtered;
   }
 }

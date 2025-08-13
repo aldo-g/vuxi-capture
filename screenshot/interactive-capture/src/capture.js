@@ -22,6 +22,11 @@ class InteractiveContentCapture {
     this.deduplicationReport = null;
     this.currentPageDomain = null;
 
+    // Dynamic discovery state
+    this.processedElementSignatures = new Set();
+    this.totalInteractions = 0;
+    this.maxInteractionsReached = false;
+
     // Subsystems
     this.env = new EnvironmentGuard(this.page);
     this.validator = new PageValidator(this.page, this.options);
@@ -41,76 +46,199 @@ class InteractiveContentCapture {
     });
   }
 
+  // Create a unique signature for an element to avoid duplicate interactions
+  _createElementSignature(element) {
+    return `${element.type}_${element.text}_${element.selector.replace(/\[data-interactive-id="[^"]+"\]/, '[data-interactive-id="*"]')}`;
+  }
+
+  // Check if we should continue processing more elements
+  _shouldContinueProcessing() {
+    return (
+      this.totalInteractions < this.options.maxInteractions &&
+      this.screenshotter.screenshots.length < this.options.maxScreenshots &&
+      !this.maxInteractionsReached
+    );
+  }
+
+  // Discover elements and filter out already processed ones
+  async _discoverNewElements() {
+    const discovery = new ElementDiscovery(this.page, this.options, this.env);
+    const allElements = await discovery.discoverInteractiveElements();
+    
+    // Filter out elements we've already processed
+    const newElements = allElements.filter(element => {
+      const signature = this._createElementSignature(element);
+      return !this.processedElementSignatures.has(signature);
+    });
+
+    console.log(`🔍 Discovered ${allElements.length} total elements, ${newElements.length} new elements to process`);
+    
+    return newElements;
+  }
+
   async captureInteractiveContent() {
-    console.log('🚀 Starting interactive content capture (modular)...');
+    console.log('🚀 Starting interactive content capture with dynamic discovery...');
     try {
       await this.env.init();
       this.currentPageDomain = this.env.currentDomain;
 
       await this.waits.waitForCompletePageLoadWithValidation();
 
+      // Take baseline screenshot
       await this.screenshotter.takeScreenshotWithQualityCheck('00_baseline');
 
-      const discovery = new ElementDiscovery(this.page, this.options, this.env);
-      this.discoveredElements = await discovery.discoverInteractiveElements();
-      console.log(`🎯 Discovered ${this.discoveredElements.length} interactive elements (external links filtered)`);
-      if (!this.discoveredElements.length) {
-        this._syncScreenshots();
-        return this.screenshots;
+      let discoveryRound = 0;
+      let consecutiveEmptyRounds = 0;
+      const maxEmptyRounds = 2; // Stop if we have 2 consecutive rounds with no new elements
+
+      // Dynamic discovery loop
+      while (this._shouldContinueProcessing() && consecutiveEmptyRounds < maxEmptyRounds) {
+        discoveryRound++;
+        console.log(`\n🔄 Discovery round ${discoveryRound}`);
+
+        // Discover new elements in current page state
+        const newElements = await this._discoverNewElements();
+        
+        if (newElements.length === 0) {
+          consecutiveEmptyRounds++;
+          console.log(`   ⚠️ No new elements found (empty round ${consecutiveEmptyRounds}/${maxEmptyRounds})`);
+          
+          // If no new elements, wait a bit for any delayed content and try once more
+          if (consecutiveEmptyRounds === 1) {
+            await this.page.waitForTimeout(1000);
+            continue;
+          } else {
+            break;
+          }
+        } else {
+          consecutiveEmptyRounds = 0;
+        }
+
+        // Process elements in this round
+        const elementsToProcess = Math.min(
+          newElements.length, 
+          this.options.maxInteractions - this.totalInteractions,
+          this.options.maxScreenshots - this.screenshotter.screenshots.length
+        );
+
+        console.log(`   🎯 Processing ${elementsToProcess} elements in this round`);
+
+        for (let i = 0; i < elementsToProcess; i++) {
+          const element = newElements[i];
+          const signature = this._createElementSignature(element);
+          
+          // Mark as processed before interaction to avoid reprocessing
+          this.processedElementSignatures.add(signature);
+          
+          console.log(`   📍 Element ${i + 1}/${elementsToProcess}: ${element.type} - "${element.text}"`);
+          
+          // Interact with the element
+          const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
+          this.totalInteractions++;
+
+          // Check if this interaction caused significant changes that might reveal new elements
+          if (interactionResult) {
+            // Wait for any animations or dynamic content to settle
+            await this.page.waitForTimeout(500);
+            
+            // Check for immediate new content (e.g., dropdowns, modals)
+            const immediateNewElements = await this._discoverNewElements();
+            if (immediateNewElements.length > 0) {
+              console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after interaction`);
+            }
+          }
+
+          // Add some breathing room between interactions
+          if (i < elementsToProcess - 1) {
+            await this.page.waitForTimeout(200);
+          }
+
+          // Check if we've hit our limits
+          if (!this._shouldContinueProcessing()) {
+            console.log(`   🛑 Stopping: reached interaction limit (${this.totalInteractions}/${this.options.maxInteractions}) or screenshot limit`);
+            this.maxInteractionsReached = true;
+            break;
+          }
+        }
+
+        // Store discovered elements for reporting
+        this.discoveredElements.push(...newElements.slice(0, elementsToProcess));
+
+        console.log(`   ✅ Round ${discoveryRound} complete. Total interactions: ${this.totalInteractions}, Screenshots: ${this.screenshotter.screenshots.length}`);
       }
 
-      const max = Math.min(this.discoveredElements.length, this.options.maxInteractions);
-      for (let i = 0; i < max; i++) {
-        if (this.screenshotter.screenshots.length >= this.options.maxScreenshots) break;
-        await this.interactor.interactWithElement(this.discoveredElements[i], i);
-        if (i < max - 1) await this.page.waitForTimeout(200);
-      }
+      console.log(`\n🏁 Dynamic discovery complete after ${discoveryRound} rounds`);
+      console.log(`   📊 Total interactions: ${this.totalInteractions}`);
+      console.log(`   📸 Total screenshots before deduplication: ${this.screenshotter.screenshots.length}`);
+      console.log(`   🔍 Unique elements processed: ${this.processedElementSignatures.size}`);
 
+      // Take final screenshot if we have too few
       if (this.screenshotter.screenshots.length < 3) {
         await this.screenshotter.takeScreenshotWithQualityCheck('99_final');
       }
 
-      // Deduplicate
+      // Deduplicate screenshots
       const { ImageDeduplicationService } = require('../../image-deduplication');
-      const dd = new ImageDeduplicationService({
+      const dedup = new ImageDeduplicationService({
         similarityThreshold: this.options.dedupeSimilarityThreshold,
         keepHighestQuality: true,
         preserveFirst: true,
         verbose: true
       });
-      let unique = await dd.processScreenshots(this.screenshotter.screenshots);
+      const uniqueScreenshots = await dedup.processScreenshots(this.screenshotter.screenshots);
+      
+      // Preserve important screenshots with specific tags
       const keepTags = new Set(['anchor', 'tabpanel', 'tabs']);
-      const names = new Set(unique.map(u => u.filename));
+      const names = new Set(uniqueScreenshots.map(u => u.filename));
       this.screenshotter.screenshots.forEach(s => {
         const tags = new Set(s.tags || []);
         if ([...tags].some(t => keepTags.has(t)) && !names.has(s.filename)) {
-          unique.push(s);
+          uniqueScreenshots.push(s);
           names.add(s.filename);
         }
       });
-      this.screenshotter.screenshots = unique;
-      this.deduplicationReport = dd.getDeduplicationReport();
+      
+      this.screenshotter.screenshots = uniqueScreenshots;
+      this.deduplicationReport = dedup.getDeduplicationReport();
 
+      // Sync public state
       this._syncScreenshots();
-      console.log(`🎉 Final: ${this.screenshots.length} unique screenshots`);
+      
       return this.screenshots;
-    } catch (e) {
-      console.error(`❌ Interactive capture failed: ${e.message}`);
+    } catch (error) {
+      console.error('❌ Error in interactive content capture:', error);
       this._syncScreenshots();
       return this.screenshots;
     }
   }
 
+  _syncScreenshots() {
+    this.screenshots = [...this.screenshotter.screenshots];
+  }
+
+  // Helper method to reset state for new capture
+  reset() {
+    this.screenshots = [];
+    this.interactionHistory.clear();
+    this.discoveredElements = [];
+    this.deduplicationReport = null;
+    this.processedElementSignatures.clear();
+    this.totalInteractions = 0;
+    this.maxInteractionsReached = false;
+    this.screenshotter.screenshots = [];
+  }
+
+  // Enhanced reporting method for backward compatibility
   getCaptureReport() {
     return {
       totalScreenshots: this.screenshots.length,
-      deduplication: this.deduplicationReport || null
+      totalInteractions: this.totalInteractions,
+      uniqueElementsProcessed: this.processedElementSignatures.size,
+      discoveredElements: this.discoveredElements.length,
+      deduplication: this.deduplicationReport || null,
+      interactionHistory: Array.from(this.interactionHistory.entries()),
+      elementSignatures: Array.from(this.processedElementSignatures)
     };
-  }
-
-  // keep this.screenshots in sync with screenshotter.screenshots for backwards compatibility
-  _syncScreenshots() {
-    this.screenshots = this.screenshotter.screenshots;
   }
 }
 
