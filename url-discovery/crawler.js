@@ -14,7 +14,7 @@ class URLCrawler {
     this.discoveredUrls = new Set();
     this.urlsToVisit = [];
     this.deduplicationKeys = new Set();
-    this.actualBaseUrl = null; // Store the final URL after redirects
+    this.actualBaseUrl = null;
     this.stats = {
       pagesCrawled: 0,
       pagesSkipped: 0,
@@ -29,17 +29,13 @@ class URLCrawler {
   
   async extractLinks(page, baseUrl) {
     try {
-      // Wait a moment for any dynamic content to load
       await page.waitForTimeout(500);
       
       const links = await page.evaluate(() => {
         return Array.from(document.querySelectorAll('a[href]')).map(link => link.href);
       });
       
-      console.log(`    🔍 Raw links found: ${links.length}`);
-      
       const validLinks = [];
-      // Use the actual base URL (after redirects) for domain checking
       const domainCheckUrl = this.actualBaseUrl || baseUrl;
       
       for (const link of links) {
@@ -65,7 +61,6 @@ class URLCrawler {
       
       return validLinks;
     } catch (error) {
-      console.error('Error extracting links:', error);
       return [];
     }
   }
@@ -75,13 +70,11 @@ class URLCrawler {
     try {
       page = await browser.newPage();
       
-      // Balanced resource blocking - keep CSS for navigation, block heavy resources
       if (this.fastMode) {
         await page.route('**/*', (route) => {
           const request = route.request();
           const resourceType = request.resourceType();
           
-          // Only block images and media, keep CSS and fonts for navigation
           if (['image', 'media'].includes(resourceType)) {
             route.abort();
           } else {
@@ -90,15 +83,12 @@ class URLCrawler {
         });
       }
       
-      console.log(`  📄 [${pageIndex}] Crawling: ${url}`);
-      
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
         timeout: this.timeout
       });
       
       if (!response || response.status() >= 400) {
-        console.log(`  ⚠️  [${pageIndex}] Warning: HTTP ${response ? response.status() : 'unknown'} for ${url}`);
         this.stats.pagesSkipped++;
         return [];
       }
@@ -107,16 +97,11 @@ class URLCrawler {
       if (pageIndex === 1) {
         const finalUrl = page.url();
         if (finalUrl !== url) {
-          console.log(`  🔄 [${pageIndex}] Redirect detected:`);
-          console.log(`      Original: ${url}`);
-          console.log(`      Final: ${finalUrl}`);
-          
           this.actualBaseUrl = finalUrl;
           this.stats.redirectDetected = true;
           this.stats.originalUrl = url;
           this.stats.finalUrl = finalUrl;
           
-          // Add the final URL to our discovered URLs if it's not already there
           const normalizedFinalUrl = normalizeUrl(finalUrl);
           if (!this.discoveredUrls.has(normalizedFinalUrl)) {
             this.discoveredUrls.add(normalizedFinalUrl);
@@ -125,19 +110,15 @@ class URLCrawler {
         }
       }
       
-      // Small wait for dynamic content
       if (this.waitTime > 0) {
         await page.waitForTimeout(this.waitTime * 1000);
       }
       
       const newLinks = await this.extractLinks(page, url);
-      console.log(`  🔗 [${pageIndex}] Found ${newLinks.length} new links`);
-      
       this.stats.pagesCrawled++;
       return newLinks;
       
     } catch (error) {
-      console.error(`  ❌ [${pageIndex}] Error crawling ${url}:`, error.message);
       this.stats.errors++;
       return [];
     } finally {
@@ -159,7 +140,6 @@ class URLCrawler {
       if (result.status === 'fulfilled') {
         allNewLinks.push(...result.value);
       } else {
-        console.error(`Batch error for ${urls[i]}:`, result.reason.message);
         this.stats.errors++;
       }
     });
@@ -192,11 +172,9 @@ class URLCrawler {
       this.urlsToVisit.push(normalizedStartUrl);
       this.discoveredUrls.add(normalizedStartUrl);
       this.deduplicationKeys.add(createDeduplicationKey(normalizedStartUrl));
-      
-      // Store original URL for stats
       this.stats.originalUrl = normalizedStartUrl;
       
-      console.log(`🚀 Starting concurrent crawl (${this.concurrency} parallel) from: ${normalizedStartUrl}`);
+      console.log(`🔍 Crawling ${normalizedStartUrl}...`);
       
       let processedCount = 0;
       
@@ -214,13 +192,8 @@ class URLCrawler {
         
         if (currentBatch.length === 0) continue;
         
-        console.log(`\n[Batch ${Math.floor(processedCount/this.concurrency) + 1}] Processing ${currentBatch.length} URLs concurrently...`);
-        
-        const batchStartTime = Date.now();
         const newLinks = await this.processBatch(browser, currentBatch, processedCount);
-        const batchDuration = (Date.now() - batchStartTime) / 1000;
         
-        // Add new links to queue
         for (const link of newLinks) {
           if (!this.visitedUrls.has(link) && !this.urlsToVisit.includes(link)) {
             this.urlsToVisit.push(link);
@@ -228,14 +201,6 @@ class URLCrawler {
         }
         
         processedCount += currentBatch.length;
-        
-        console.log(`  ⚡ Batch completed in ${batchDuration.toFixed(2)}s`);
-        console.log(`  📊 Queue: ${this.urlsToVisit.length} | Discovered: ${this.discoveredUrls.size} | Visited: ${this.visitedUrls.size} | Duplicates: ${this.stats.duplicatesSkipped}`);
-        
-        // Show redirect info if detected
-        if (this.stats.redirectDetected && processedCount === currentBatch.length) {
-          console.log(`  🔄 Using redirected domain: ${this.actualBaseUrl}`);
-        }
       }
       
       const finalUrls = deduplicateUrls(Array.from(this.discoveredUrls));
@@ -245,10 +210,11 @@ class URLCrawler {
       this.stats.totalUrlsDiscovered = this.discoveredUrls.size;
       this.stats.duplicatesRemoved = this.discoveredUrls.size - finalUrls.length;
       
-      // Set final URL in stats if no redirect was detected
       if (!this.stats.finalUrl) {
         this.stats.finalUrl = this.stats.originalUrl;
       }
+      
+      console.log(`✅ Found ${finalUrls.length} URLs in ${this.stats.duration.toFixed(1)}s`);
       
       return {
         urls: finalUrls,

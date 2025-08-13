@@ -1,6 +1,3 @@
-// Enhanced Screenshot Service Integration
-// This integrates the InteractiveContentCapture with your existing screenshot workflow
-
 const { chromium } = require('playwright');
 const fs = require('fs-extra');
 const path = require('path');
@@ -19,7 +16,6 @@ class EnhancedScreenshotCapture {
     this.browser = null;
     this.enhancer = new ScreenshotEnhancer();
     
-    // Interactive capture options
     this.interactiveOptions = {
       maxInteractions: options.maxInteractions || 30,
       maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
@@ -28,7 +24,6 @@ class EnhancedScreenshotCapture {
       ...options
     };
 
-    // Create output directory structure
     this.screenshotsDir = path.join(outputDir, 'desktop');
     fs.ensureDirSync(this.screenshotsDir);
   }
@@ -58,7 +53,6 @@ class EnhancedScreenshotCapture {
         await this.browser.close();
         this.browser = null;
       } catch (error) {
-        console.error('⚠️ Error closing browser:', error.message);
         this.browser = null;
       }
     }
@@ -70,9 +64,7 @@ class EnhancedScreenshotCapture {
     
     try {
       await this.init();
-      console.log(`📸 [${index}] Starting capture: ${url}`);
       
-      // Create browser context
       context = await this.browser.newContext({
         viewport: this.viewport,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -82,7 +74,6 @@ class EnhancedScreenshotCapture {
       
       const page = await context.newPage();
       
-      // Navigate to page
       const response = await page.goto(url, {
         waitUntil: 'domcontentloaded',
         timeout: this.timeout
@@ -92,17 +83,13 @@ class EnhancedScreenshotCapture {
         throw new Error(`Failed to load page: HTTP ${response ? response.status() : 'unknown'}`);
       }
       
-      // Wait for network idle
       await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      
-      // Apply page enhancements (cookie removal, etc.)
       await this.enhancer.enhance(page);
       await page.waitForTimeout(1000);
       
       let captureResults = [];
       
       if (this.interactiveOptions.enableInteractiveCapture) {
-        // ENHANCED INTERACTIVE CAPTURE
         const interactiveCapture = new InteractiveContentCapture(page, {
           maxInteractions: this.interactiveOptions.maxInteractions,
           maxScreenshots: this.interactiveOptions.maxScreenshotsPerPage,
@@ -111,7 +98,6 @@ class EnhancedScreenshotCapture {
         
         const screenshots = await interactiveCapture.captureInteractiveContent();
         
-        // Save all screenshots from interactive capture
         for (let i = 0; i < screenshots.length; i++) {
           const screenshot = screenshots[i];
           const filename = createEnhancedFilename(url, index, i);
@@ -124,7 +110,6 @@ class EnhancedScreenshotCapture {
               continue;
             }
           } catch (saveError) {
-            console.error(`❌ Error saving ${filename}:`, saveError.message);
             continue;
           }
           
@@ -139,7 +124,6 @@ class EnhancedScreenshotCapture {
           });
         }
         
-        // Save detailed report
         const reportPath = path.join(this.screenshotsDir, `${createFilename(url, index)}_report.json`);
         const report = interactiveCapture.getCaptureReport();
         await fs.writeJson(reportPath, {
@@ -151,7 +135,6 @@ class EnhancedScreenshotCapture {
         }, { spaces: 2 });
         
       } else {
-        // STANDARD SINGLE SCREENSHOT
         const filename = createFilename(url, index);
         const filepath = path.join(this.screenshotsDir, filename);
         
@@ -173,20 +156,19 @@ class EnhancedScreenshotCapture {
       }
       
       const duration = Date.now() - startTime;
-      console.log(`✅ Captured ${captureResults.length} screenshots in ${duration}ms`);
+      console.log(`📸 [${index}] ${url} - ${captureResults.length} screenshots (${duration}ms)`);
       
       return captureResults;
       
     } catch (error) {
-      const duration = Date.now() - startTime;
-      console.error(`❌ Error after ${duration}ms: ${error.message}`);
+      console.error(`❌ [${index}] ${url} - ${error.message}`);
       throw error;
     } finally {
       if (context) {
         try {
           await context.close();
         } catch (closeError) {
-          console.error(`⚠️ Error closing context: ${closeError.message}`);
+          // Silent fail
         }
       }
     }
@@ -200,15 +182,13 @@ class EnhancedScreenshotService {
     this.timeout = options.timeout || 45000;
     this.concurrent = options.concurrent || 4;
     
-    // Enhanced interactive capture options
     this.enableInteractiveCapture = options.enableInteractiveCapture !== false;
     this.maxInteractions = options.maxInteractions || 30;
     this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 15;
     this.interactionDelay = options.interactionDelay || 800;
     this.changeDetectionTimeout = options.changeDetectionTimeout || 2000;
     
-    console.log('📸 Enhanced Screenshot Service initialized');
-    console.log(`🎯 Interactive capture: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`📸 Enhanced Screenshot Service - Interactive: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
   }
   
   async captureAll(urls) {
@@ -218,12 +198,6 @@ class EnhancedScreenshotService {
     try {
       console.log(`📸 Starting capture of ${urls.length} URLs`);
       
-      if (this.enableInteractiveCapture) {
-        console.log(`📊 Max screenshots per page: ${this.maxScreenshotsPerPage}`);
-        console.log(`⚡ Max interactions per page: ${this.maxInteractions}`);
-      }
-      
-      // Create enhanced screenshot capture instance
       screenshotCapture = new EnhancedScreenshotCapture(this.outputDir, {
         width: this.viewport.width,
         height: this.viewport.height,
@@ -234,7 +208,6 @@ class EnhancedScreenshotService {
         interactionDelay: this.interactionDelay
       });
       
-      // Process URLs in batches for concurrency
       const allResults = [];
       const batchSize = this.concurrent;
       
@@ -244,17 +217,14 @@ class EnhancedScreenshotService {
         allResults.push(...batchResults);
       }
       
-      // Calculate statistics
       const successful = allResults.filter(r => r.success);
       const failed = allResults.filter(r => !r.success);
       const duration = (Date.now() - startTime) / 1000;
       
-      // Calculate total screenshots
       const totalScreenshots = successful.reduce((total, result) => {
         return total + (Array.isArray(result.data) ? result.data.length : 1);
       }, 0);
       
-      // Enhanced metadata with interactive capture stats
       const metadata = {
         timestamp: new Date().toISOString(),
         duration_seconds: duration,
@@ -270,17 +240,10 @@ class EnhancedScreenshotService {
         ).length
       };
       
-      // Save enhanced metadata
       const metadataPath = path.join(this.outputDir, 'enhanced_metadata.json');
       await fs.writeJson(metadataPath, metadata, { spaces: 2 });
       
-      console.log(`🎉 Enhanced screenshot service completed`);
-      console.log(`📸 Total screenshots: ${totalScreenshots} (avg ${metadata.average_screenshots_per_page} per page)`);
-      console.log(`⚡ Processing speed: ${(totalScreenshots/duration).toFixed(1)} screenshots/second`);
-      console.log(`⏱️  Total duration: ${duration.toFixed(2)} seconds`);
-      console.log(`✅ Successful pages: ${successful.length}/${urls.length}`);
-      console.log(`❌ Failed pages: ${failed.length}/${urls.length}`);
-      console.log(`🎯 Pages with interactive content: ${metadata.interactive_pages_found}/${successful.length}`);
+      console.log(`✅ Captured ${totalScreenshots} screenshots from ${successful.length}/${urls.length} pages (${duration.toFixed(1)}s)`);
       
       return {
         success: successful.length > 0,
@@ -294,12 +257,13 @@ class EnhancedScreenshotService {
           processingSpeed: (totalScreenshots/duration).toFixed(1)
         },
         files: {
-          metadata: metadataPath
+          metadata: metadataPath,
+          screenshotsDir: path.join(this.outputDir, 'desktop')
         }
       };
       
     } catch (error) {
-      console.error('💥 Enhanced screenshot service failed:', error);
+      console.error('❌ Enhanced screenshot service failed:', error.message);
       throw error;
     } finally {
       if (screenshotCapture) {
@@ -316,10 +280,11 @@ class EnhancedScreenshotService {
     
     return await Promise.allSettled(batchPromises).then(results => 
       results.map((result, index) => {
+        const url = urls[index];
         if (result.status === 'fulfilled') {
-          return { success: true, url: urls[index], data: result.value };
+          return { success: true, url, data: result.value };
         } else {
-          return { success: false, url: urls[index], error: result.reason.message };
+          return { success: false, url, error: result.reason.message };
         }
       })
     );
@@ -327,24 +292,17 @@ class EnhancedScreenshotService {
   
   async processSingleUrl(url, index, screenshotCapture) {
     try {
-      const results = await screenshotCapture.captureUrl(url, index);
-      return results;
+      return await screenshotCapture.captureUrl(url, index + 1);
     } catch (error) {
-      console.error(`❌ Failed to capture ${url}: ${error.message}`);
-      throw error;
+      throw new Error(`Failed to capture ${url}: ${error.message}`);
     }
   }
 }
 
-// Helper function to create enhanced filenames
-function createEnhancedFilename(url, urlIndex, screenshotIndex) {
-  const urlPart = new URL(url).hostname.replace(/[^a-zA-Z0-9]/g, '');
-  const paddedUrlIndex = String(urlIndex + 1).padStart(3, '0');
-  const paddedScreenshotIndex = String(screenshotIndex + 1).padStart(2, '0');
-  return `${paddedUrlIndex}_${urlPart}_index_${paddedScreenshotIndex}.png`;
+function createEnhancedFilename(url, index, screenshotIndex) {
+  const baseFilename = createFilename(url, index);
+  const nameWithoutExt = baseFilename.replace('.png', '');
+  return `${nameWithoutExt}_${screenshotIndex.toString().padStart(2, '0')}.png`;
 }
 
-module.exports = {
-  EnhancedScreenshotService,
-  EnhancedScreenshotCapture
-};
+module.exports = { EnhancedScreenshotService, EnhancedScreenshotCapture };
