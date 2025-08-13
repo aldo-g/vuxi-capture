@@ -220,12 +220,6 @@ class ElementDiscovery {
       filtered.push(el);
     }
     
-    // Log the discovered elements for debugging
-    console.log('🔍 Discovered elements:');
-    filtered.forEach((el, index) => {
-      console.log(`  ${index + 1}. Type: ${el.type}, Text: "${el.text}", Selector: ${el.selector}`);
-    });
-    
     return filtered;
   }
 }

@@ -47,7 +47,6 @@ class InteractionEngine {
 
   // Re-apply the data-button-text attributes and other identifiers that discovery process adds
   async reapplyElementIdentifiers() {
-    console.log('🔧 Re-applying element identifiers...');
     
     await this.page.evaluate(() => {
       // Re-add data-button-text attributes to buttons with text
@@ -74,9 +73,7 @@ class InteractionEngine {
       return false;
     }
 
-    try {
-      console.log('🔄 Restoring page to baseline state...');
-      
+    try {      
       // Strategy 1: Try to navigate back to baseline URL if it's different
       const currentUrl = this.page.url();
       if (currentUrl !== this.baselineState.url) {
@@ -212,9 +209,7 @@ class InteractionEngine {
         return { success: true, method: 'fallback_clean_state' };
         
       }, this.baselineState);
-      
-      console.log(`🔄 Reset result: ${JSON.stringify(resetResult)}`);
-      
+            
       // Wait for any animations or state changes to complete
       await this.page.waitForTimeout(1200);
       
@@ -246,8 +241,6 @@ class InteractionEngine {
         };
       });
       
-      console.log(`✅ Current state after restoration:`, JSON.stringify(currentState, null, 2));
-      console.log('✅ Successfully restored to baseline state');
       return true;
       
     } catch (error) {
@@ -305,18 +298,14 @@ class InteractionEngine {
                 visible: btn.getBoundingClientRect().width > 0 && btn.getBoundingClientRect().height > 0
               }));
             });
-            
-            console.log(`   🔍 Available buttons on page:`, JSON.stringify(availableButtons, null, 2));
-            
+                        
             const alternativeSelector = await this.page.evaluate((text, originalSelector) => {
               if (!text) return null;
               
               console.log(`Looking for button with text: "${text}"`);
-              console.log(`Original selector was: ${originalSelector}`);
               
               // Strategy 1: Try to find button by exact text match
               const buttons = Array.from(document.querySelectorAll('button'));
-              console.log(`Total buttons found: ${buttons.length}`);
               
               const matchingButton = buttons.find(btn => {
                 const btnText = (btn.textContent || '').trim().toLowerCase();

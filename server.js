@@ -152,20 +152,6 @@ app.post('/api/capture', async (req, res) => {
     jobs.set(jobId, job);
     console.log(`✅ Job ${jobId.slice(0,8)} created for ${baseUrl}`);
     
-    // Log enhanced features being used
-    if (job.options.captureInteractive) {
-      console.log(`🎯 ENHANCED INTERACTIVE CAPTURE ENABLED:`);
-      console.log(`   • Max interactions per page: ${job.options.maxInteractions}`);
-      console.log(`   • Max screenshots per page: ${job.options.maxScreenshotsPerPage}`);
-      console.log(`   • Interaction delay: ${job.options.interactionDelay}ms`);
-      console.log(`   • Change detection timeout: ${job.options.changeDetectionTimeout}ms`);
-      if (job.options.enableHoverCapture) {
-        console.log(`   • Hover capture: ENABLED`);
-      }
-    } else {
-      console.log(`📸 Standard capture mode (1 screenshot per page)`);
-    }
-    
     // Start processing asynchronously with better error handling
     setImmediate(() => {
       processJob(jobId).catch(error => {
