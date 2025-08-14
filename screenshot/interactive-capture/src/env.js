@@ -28,7 +28,7 @@ class EnvironmentGuard {
   }
 
   async isExternalLink(selector) {
-    return await this.page.evaluate((sel, currentDomain) => {
+    return await this.page.evaluate(({ sel, currentDomain }) => {
       const el = document.querySelector(sel);
       if (!el || el.tagName !== 'A') return false;
       const href = el.href;
@@ -41,7 +41,7 @@ class EnvironmentGuard {
       } catch (_) {
         return true;
       }
-    }, selector, this.currentDomain);
+    }, { sel: selector, currentDomain: this.currentDomain });
   }
 }
 
