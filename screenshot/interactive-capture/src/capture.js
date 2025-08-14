@@ -26,6 +26,8 @@ class InteractiveContentCapture {
     this.processedElementSignatures = new Set();
     this.totalInteractions = 0;
     this.maxInteractionsReached = false;
+    this.filterGroupInteracted = false;
+    this.filterOptionInteracted = false;
 
     // Subsystems
     this.env = new EnvironmentGuard(this.page);
@@ -125,11 +127,21 @@ class InteractiveContentCapture {
         );
 
         console.log(`   🎯 Processing ${elementsToProcess} elements in this round`);
+        let interactedInRound = false;
 
         for (let i = 0; i < elementsToProcess; i++) {
           const element = newElements[i];
           const signature = this._createElementSignature(element);
           
+          if (this.filterGroupInteracted && element.type === 'explicit') {
+            if(this.filterOptionInteracted) {
+              console.log(`🔄 Skipping extra filter option: "${element.text}"`);
+              this.processedElementSignatures.add(signature);
+              continue;
+            }
+            this.filterOptionInteracted = true;
+          }
+
           // Mark as processed before interaction to avoid reprocessing
           this.processedElementSignatures.add(signature);
           
@@ -144,6 +156,11 @@ class InteractiveContentCapture {
           // Interact with the element (state restoration is handled within interactWithElement)
           const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
           this.totalInteractions++;
+          interactedInRound = true;
+
+          if (element.text.toLowerCase().includes('filter')) {
+            this.filterGroupInteracted = true;
+          }
 
           // Check if this interaction caused significant changes that might reveal new elements
           if (interactionResult && interactionResult.success) {
@@ -169,6 +186,9 @@ class InteractiveContentCapture {
             this.maxInteractionsReached = true;
             break;
           }
+        }
+        if (!interactedInRound) {
+            consecutiveEmptyRounds++;
         }
 
         // Store discovered elements for reporting
@@ -236,6 +256,8 @@ class InteractiveContentCapture {
     this.totalInteractions = 0;
     this.maxInteractionsReached = false;
     this.screenshotter.screenshots = [];
+    this.filterGroupInteracted = false;
+    this.filterOptionInteracted = false;
     
     // Reset baseline state in interactor
     if (this.interactor) {
