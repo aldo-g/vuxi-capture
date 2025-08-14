@@ -136,6 +136,7 @@ class ElementDiscovery {
 
       // Create a map to track elements by their text content to ensure uniqueness
       const elementsByText = new Map();
+      const uniqueSignatures = new Set(); // <-- **This is the key change**
 
       cats.forEach(c => c.selectors.forEach(sel => {
         try {
@@ -146,6 +147,15 @@ class ElementDiscovery {
 
             const elementType = c.get(el);
             if (!elementType) return;
+            
+            // Create a signature for the element to detect duplicates
+            const signature = `${el.tagName}_${el.className}_${t}`;
+            if (uniqueSignatures.has(signature)) {
+                console.log(`🔄 Skipping duplicate element with signature: "${signature}"`);
+                return;
+            }
+            uniqueSignatures.add(signature);
+
 
             // Use a combination of element properties for uniqueness check
             const uniqueKey = `${el.tagName}_${el.className}_${t}_${el.getAttribute('aria-label') || ''}_${el.outerHTML.slice(0, 200)}`;
