@@ -1,66 +1,33 @@
 /**
- * Validates if a URL is properly formatted
+ * URL discovery utilities with enhanced diversity filtering
+ */
+
+/**
+ * Checks if a URL is valid and accessible
  * @param {string} url - URL to validate
  * @returns {boolean} True if valid, false otherwise
  */
 function isValidUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  
   try {
-    new URL(url);
-    return true;
+    const urlObj = new URL(url);
+    return ['http:', 'https:'].includes(urlObj.protocol);
   } catch {
     return false;
   }
 }
 
 /**
- * Normalizes a URL for deduplication purposes
+ * Normalizes a URL for consistent comparison
  * @param {string} url - URL to normalize
- * @param {boolean} removeQueryParams - Whether to remove query parameters
  * @returns {string} Normalized URL
  */
-function normalizeUrl(url, removeQueryParams = false) {
+function normalizeUrl(url) {
   try {
     const urlObj = new URL(url);
     
-    // Remove www. prefix for consistency
-    if (urlObj.hostname.startsWith('www.')) {
-      urlObj.hostname = urlObj.hostname.substring(4);
-    }
-    
-    // Remove fragment
-    urlObj.hash = '';
-    
-    if (removeQueryParams) {
-      // Remove all query parameters for deduplication
-      urlObj.search = '';
-    } else {
-      // Keep query parameters but sort them
-      const params = new URLSearchParams(urlObj.search);
-      params.sort();
-      urlObj.search = params.toString();
-    }
-    
-    // Remove trailing slash from pathname (unless it's just '/')
-    if (urlObj.pathname !== '/' && urlObj.pathname.endsWith('/')) {
-      urlObj.pathname = urlObj.pathname.slice(0, -1);
-    }
-    
-    return urlObj.toString();
-  } catch {
-    return url;
-  }
-}
-
-/**
- * Creates a simplified URL for deduplication
- * @param {string} url - URL to simplify
- * @returns {string} Simplified URL without language/irrelevant query params
- */
-function createDeduplicationKey(url) {
-  try {
-    const urlObj = new URL(url);
-    
-    // Remove www. prefix for consistency
+    // Remove www prefix for consistency
     if (urlObj.hostname.startsWith('www.')) {
       urlObj.hostname = urlObj.hostname.substring(4);
     }
@@ -107,6 +74,26 @@ function createDeduplicationKey(url) {
     }
     
     return urlObj.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Creates a deduplication key for URL comparison
+ * @param {string} url - URL to create key for
+ * @returns {string} Deduplication key
+ */
+function createDeduplicationKey(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
+    
+    // Create a key based on domain + path structure
+    const domain = urlObj.hostname.replace(/^www\./, '');
+    const pathKey = pathParts.join('/');
+    
+    return `${domain}:${pathKey}`;
   } catch {
     return url;
   }
@@ -207,24 +194,12 @@ function shouldExcludeUrl(url, excludePatterns = []) {
     /\/(legal|privacy|cookies|terms|disclaimer|gdpr)$/i,
     
     // Newsletter/subscribe forms (but keep contact pages!)
-    /\/(newsletter|subscribe)$/i,
+    /\/(newsletter|subscribe)$/i
   ];
   
-  // Check against default exclusions
-  for (const pattern of defaultExclusions) {
-    if (pattern.test(url)) {
-      return true;
-    }
-  }
+  const allPatterns = [...defaultExclusions, ...excludePatterns];
   
-  // Check against custom exclusions
-  for (const pattern of excludePatterns) {
-    if (pattern.test(url)) {
-      return true;
-    }
-  }
-  
-  return false;
+  return allPatterns.some(pattern => pattern.test(url));
 }
 
 /**
@@ -234,8 +209,7 @@ function shouldExcludeUrl(url, excludePatterns = []) {
  */
 function getUrlDepth(url) {
   try {
-    const urlObj = new URL(url);
-    const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
+    const pathParts = new URL(url).pathname.split('/').filter(part => part.length > 0);
     return pathParts.length;
   } catch {
     return 0;
@@ -243,171 +217,89 @@ function getUrlDepth(url) {
 }
 
 /**
- * General URL filtering - intelligently reduces URLs to specified limit
+ * Performs hierarchical sampling of URLs
  * @param {string[]} urls - Array of URLs
- * @param {Object} options - Filtering options
- * @returns {string[]} Filtered URL list
+ * @param {number} maxUrls - Maximum URLs to return
+ * @returns {string[]} Sampled URLs
  */
-function simpleAggressiveFilter(urls, options = {}) {
-  const {
-    maxUrlsTotal = 10
-  } = options;
+function hierarchicalSampling(urls, maxUrls) {
+  if (urls.length <= maxUrls) return urls;
   
-  console.log(`🔥 Applying general URL filter (target: ${maxUrlsTotal} URLs)...`);
-  
-  if (urls.length <= maxUrlsTotal) {
-    console.log(`📊 No filtering needed - ${urls.length} URLs ≤ ${maxUrlsTotal} limit`);
-    return urls;
-  }
-  
-  // Score URLs by importance
-  const scoredUrls = urls.map(url => {
-    let score = 0;
-    
-    try {
-      const urlObj = new URL(url);
-      const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
-      const depth = pathParts.length;
-      const path = urlObj.pathname.toLowerCase();
-      
-      // Homepage gets highest priority
-      if (depth === 0) {
-        score += 100;
-      }
-      
-      // Important pages get high priority
-      if (path.includes('about') || path.includes('contact') || path.includes('service') || 
-          path.includes('product') || path.includes('training') || path.includes('research') ||
-          path.includes('project')) {
-        score += 50;
-      }
-      
-      // Overview/category pages (1-2 levels deep) get medium-high priority
-      if (depth >= 1 && depth <= 2) {
-        score += 30;
-      }
-      
-      // Shorter paths are generally more important
-      score += Math.max(0, 10 - depth);
-      
-      // Shorter URLs are often more general/important
-      score += Math.max(0, 10 - Math.floor(url.length / 20));
-      
-      // Penalize very deep or complex URLs
-      if (depth > 4) {
-        score -= 20;
-      }
-      
-      // Penalize URLs with many query parameters
-      const paramCount = urlObj.searchParams.size;
-      if (paramCount > 2) {
-        score -= paramCount * 5;
-      }
-      
-    } catch (error) {
-      // If URL parsing fails, give it a neutral score
-      score = 25;
-    }
-    
-    return { url, score };
+  // Group URLs by depth
+  const depthGroups = {};
+  urls.forEach(url => {
+    const depth = getUrlDepth(url);
+    if (!depthGroups[depth]) depthGroups[depth] = [];
+    depthGroups[depth].push(url);
   });
   
-  // Sort by score (highest first) and take the top URLs
-  const sortedUrls = scoredUrls
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxUrlsTotal)
-    .map(item => item.url);
+  const result = [];
+  const depths = Object.keys(depthGroups).map(Number).sort((a, b) => a - b);
   
-  console.log(`📉 URLs filtered from ${urls.length} to ${sortedUrls.length}`);
-  console.log(`   Kept highest-scoring URLs based on importance and depth`);
+  // Distribute quota across depths, favoring shallower depths
+  let remaining = maxUrls;
+  for (const depth of depths) {
+    if (remaining <= 0) break;
+    
+    const groupUrls = depthGroups[depth];
+    const quota = Math.min(remaining, Math.ceil(remaining / (depths.length - depths.indexOf(depth))));
+    
+    // Take first 'quota' URLs from this depth
+    result.push(...groupUrls.slice(0, quota));
+    remaining -= quota;
+  }
   
-  return sortedUrls;
+  return result.slice(0, maxUrls);
 }
 
 /**
- * Prioritizes URLs using hierarchical sampling
- * @param {string[]} urls - Array of URLs
- * @param {Object} options - Sampling options
- * @returns {string[]} Prioritized and sampled URLs
+ * Simple aggressive filtering to reduce similar URLs
+ * @param {string[]} urls - URLs to filter
+ * @param {number} maxUrls - Maximum URLs to keep
+ * @returns {string[]} Filtered URLs
  */
-function hierarchicalSampling(urls, options = {}) {
-  const {
-    maxDepth = 3,           // Maximum path depth to include
-    samplesPerCategory = 2, // Max individual items per category
-    prioritizeOverviews = true, // Prefer category pages over individual items
-    skipLegalPages = true   // Skip legal/footer pages
-  } = options;
+function simpleAggressiveFilter(urls, maxUrls) {
+  if (urls.length <= maxUrls) return urls;
   
-  const categorized = new Map();
-  const overview = [];
-  const individual = [];
+  const result = [];
+  const seenPatterns = new Set();
   
-  // Categorize URLs
-  for (const url of urls) {
+  // Sort by URL simplicity (shorter = more general)
+  const sorted = urls.sort((a, b) => a.length - b.length);
+  
+  for (const url of sorted) {
+    if (result.length >= maxUrls) break;
+    
     try {
-      const urlObj = new URL(url);
-      const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
-      const depth = pathParts.length;
+      const pathParts = new URL(url).pathname.split('/').filter(p => p);
       
-      // Skip very deep URLs
-      if (depth > maxDepth) continue;
+      // Create pattern from first 2 path segments
+      const pattern = pathParts.slice(0, 2).join('/');
       
-      // Skip legal pages if enabled (but keep contact pages)
-      if (skipLegalPages && /\/(legal|privacy|cookies|terms|disclaimer|newsletter|subscribe)$/i.test(url)) {
-        continue;
+      if (!seenPatterns.has(pattern) || seenPatterns.size < maxUrls * 0.7) {
+        result.push(url);
+        seenPatterns.add(pattern);
       }
-      
-      // Root page
-      if (depth === 0) {
-        overview.push(url);
-        continue;
-      }
-      
-      // Category overview pages (1-2 levels deep)
-      if (depth <= 2) {
-        overview.push(url);
-        continue;
-      }
-      
-      // Individual content pages (3+ levels deep)
-      const category = pathParts.slice(0, 2).join('/'); // First 2 path segments
-      if (!categorized.has(category)) {
-        categorized.set(category, []);
-      }
-      categorized.get(category).push(url);
-      
-    } catch (error) {
-      // If URL parsing fails, include it in overview
-      overview.push(url);
+    } catch {
+      if (result.length < maxUrls) result.push(url);
     }
   }
   
-  // Sample from individual content
-  for (const [category, categoryUrls] of categorized) {
-    // Sort by URL length (shorter URLs often have more general content)
-    const sorted = categoryUrls.sort((a, b) => a.length - b.length);
-    individual.push(...sorted.slice(0, samplesPerCategory));
-  }
-  
-  // Combine results, prioritizing overview pages
-  return prioritizeOverviews ? [...overview, ...individual] : [...individual, ...overview];
+  return result;
 }
 
 /**
- * Groups URLs by category and limits the number per category
- * @param {string[]} urls - Array of URLs
- * @param {number} maxPerCategory - Maximum URLs per category
- * @returns {string[]} Filtered array
+ * Limits URLs per category pattern
+ * @param {string[]} urls - URLs to process
+ * @param {number} limitPerCategory - Max URLs per category
+ * @returns {string[]} Limited URLs
  */
-function limitUrlsPerCategory(urls, maxPerCategory = 5) {
+function limitUrlsPerCategory(urls, limitPerCategory = 3) {
   const categories = new Map();
   
   for (const url of urls) {
     try {
-      const urlObj = new URL(url);
-      const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
-      
-      // Use the first path segment as category (e.g., /articles, /customer-cases)
+      const pathParts = new URL(url).pathname.split('/').filter(p => p);
       const category = pathParts[0] || 'root';
       
       if (!categories.has(category)) {
@@ -415,103 +307,321 @@ function limitUrlsPerCategory(urls, maxPerCategory = 5) {
       }
       
       const categoryUrls = categories.get(category);
-      if (categoryUrls.length < maxPerCategory) {
+      if (categoryUrls.length < limitPerCategory) {
         categoryUrls.push(url);
       }
-    } catch (error) {
-      // If URL parsing fails, include it anyway
-      continue;
+    } catch {
+      // If URL parsing fails, still include it
+      const category = 'unknown';
+      if (!categories.has(category)) {
+        categories.set(category, []);
+      }
+      
+      const categoryUrls = categories.get(category);
+      if (categoryUrls.length < limitPerCategory) {
+        categoryUrls.push(url);
+      }
     }
   }
   
-  // Flatten all category arrays
-  const result = [];
-  for (const categoryUrls of categories.values()) {
-    result.push(...categoryUrls);
-  }
-  
-  return result;
+  return Array.from(categories.values()).flat();
 }
 
 /**
- * Extracts the domain from a URL
+ * Extracts domain from URL
  * @param {string} url - URL to extract domain from
- * @returns {string|null} Domain name or null if invalid
+ * @returns {string} Domain name
  */
 function extractDomain(url) {
   try {
-    const urlObj = new URL(url);
-    return urlObj.hostname.replace(/^www\./, '');
+    return new URL(url).hostname.replace(/^www\./, '');
   } catch {
-    return null;
+    return 'unknown';
   }
 }
 
 /**
- * Formats a duration in milliseconds to a human-readable string
- * @param {number} milliseconds - Duration in milliseconds
- * @returns {string} Formatted duration string
+ * Formats duration in human readable format
+ * @param {number} seconds - Duration in seconds
+ * @returns {string} Formatted duration
  */
-function formatDuration(milliseconds) {
-  const seconds = Math.floor(milliseconds / 1000);
+function formatDuration(seconds) {
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
-  
-  if (minutes > 0) {
-    return `${minutes}m ${remainingSeconds}s`;
-  }
-  return `${remainingSeconds}s`;
+  return `${minutes}m ${remainingSeconds.toFixed(1)}s`;
 }
 
 /**
- * Deduplicates an array of URLs, preferring simpler versions
- * @param {string[]} urls - Array of URLs
- * @returns {string[]} Deduplicated array
+ * Advanced deduplication of URLs
+ * @param {string[]} urls - URLs to deduplicate
+ * @returns {string[]} Deduplicated URLs
  */
 function deduplicateUrls(urls) {
-  const urlMap = new Map();
-  
-  // Group URLs by their deduplicated key
-  for (const url of urls) {
-    const key = createDeduplicationKey(url);
-    
-    if (!urlMap.has(key)) {
-      urlMap.set(key, []);
-    }
-    urlMap.get(key).push(url);
-  }
-  
-  // For each group, prefer the non-www version if available, otherwise the simplest
+  const seen = new Set();
   const result = [];
-  for (const [key, similarUrls] of urlMap) {
-    // Sort by preference: 
-    // 1. Non-www URLs first
-    // 2. Fewer query parameters
-    // 3. Shorter path length
-    const sorted = similarUrls.sort((a, b) => {
-      const aHasWww = new URL(a).hostname.startsWith('www.');
-      const bHasWww = new URL(b).hostname.startsWith('www.');
-      
-      // Prefer non-www
-      if (aHasWww && !bHasWww) return 1;
-      if (!aHasWww && bHasWww) return -1;
-      
-      // If both have same www status, prefer fewer query params
-      const paramsA = new URL(a).searchParams.size;
-      const paramsB = new URL(b).searchParams.size;
-      if (paramsA !== paramsB) return paramsA - paramsB;
-      
-      // If same query params, prefer shorter path
-      const pathA = new URL(a).pathname.length;
-      const pathB = new URL(b).pathname.length;
-      return pathA - pathB;
-    });
+  
+  for (const url of urls) {
+    const normalized = normalizeUrl(url);
+    const key = createDeduplicationKey(normalized);
     
-    // Take the preferred URL
-    result.push(sorted[0]);
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(normalized);
+    }
   }
   
   return result;
+}
+
+/**
+ * Analyzes URL patterns and limits similar content
+ * @param {string[]} urls - Array of URLs to filter
+ * @param {Object} options - Filtering options
+ * @returns {string[]} Filtered array of more diverse URLs
+ */
+function enhanceUrlDiversity(urls, options = {}) {
+  const {
+    maxPerCategory = 2,           // Max URLs per category (e.g., max 2 from /industries/*)
+    maxDepthVariations = 3,       // Max variations at same depth level
+    prioritizeHigherLevels = true, // Prefer /industries over /industries/sustainable-*
+    excludeSimilarPatterns = true  // Remove very similar URL patterns
+  } = options;
+
+  // Group URLs by pattern categories
+  const categories = new Map();
+  const rootUrls = [];
+  
+  urls.forEach(url => {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
+    
+    // Handle root/homepage separately
+    if (pathParts.length === 0) {
+      rootUrls.push(url);
+      return;
+    }
+    
+    // Create category key based on path structure
+    const categoryKey = pathParts.length > 1 ? pathParts[0] : 'single-level';
+    const subcategoryKey = pathParts.length > 1 ? `${pathParts[0]}/${pathParts[1]}` : pathParts[0];
+    
+    if (!categories.has(categoryKey)) {
+      categories.set(categoryKey, new Map());
+    }
+    
+    if (!categories.get(categoryKey).has('items')) {
+      categories.get(categoryKey).set('items', []);
+    }
+    
+    categories.get(categoryKey).get('items').push({
+      url,
+      pathParts,
+      depth: pathParts.length,
+      subcategory: subcategoryKey
+    });
+  });
+
+  const diverseUrls = [...rootUrls]; // Always include homepage
+  
+  // Process each category
+  categories.forEach((subcategories, categoryName) => {
+    const items = subcategories.get('items') || [];
+    
+    if (items.length === 0) return;
+    
+    // Sort by priority: shorter paths first (more general pages)
+    items.sort((a, b) => {
+      if (prioritizeHigherLevels && a.depth !== b.depth) {
+        return a.depth - b.depth;
+      }
+      // Then by URL length (simpler URLs first)
+      return a.url.length - b.url.length;
+    });
+    
+    // Group by subcategory to ensure diversity
+    const subcategoryGroups = new Map();
+    items.forEach(item => {
+      const key = item.depth === 1 ? 'root-level' : item.subcategory;
+      if (!subcategoryGroups.has(key)) {
+        subcategoryGroups.set(key, []);
+      }
+      subcategoryGroups.get(key).push(item);
+    });
+    
+    // Select diverse URLs from this category
+    const categoryUrls = [];
+    let totalSelected = 0;
+    
+    // First, add one from each subcategory
+    subcategoryGroups.forEach((subItems, subKey) => {
+      if (totalSelected < maxPerCategory && subItems.length > 0) {
+        categoryUrls.push(subItems[0].url);
+        totalSelected++;
+      }
+    });
+    
+    // If we still have slots, fill from subcategories with multiple items
+    if (totalSelected < maxPerCategory) {
+      subcategoryGroups.forEach((subItems, subKey) => {
+        for (let i = 1; i < subItems.length && totalSelected < maxPerCategory; i++) {
+          categoryUrls.push(subItems[i].url);
+          totalSelected++;
+        }
+      });
+    }
+    
+    diverseUrls.push(...categoryUrls.slice(0, maxPerCategory));
+  });
+  
+  return diverseUrls;
+}
+
+/**
+ * Advanced pattern-based URL filtering
+ * @param {string[]} urls - URLs to filter
+ * @returns {string[]} Filtered URLs with better diversity
+ */
+function intelligentUrlFilter(urls) {
+  const patterns = {
+    // Define patterns and their limits
+    blog: { pattern: /\/(blog|news|articles)\//, limit: 3 },
+    products: { pattern: /\/(products?|services?)\//, limit: 4 },
+    cases: { pattern: /\/(case-studies?|customer-cases?)\//, limit: 2 },
+    industries: { pattern: /\/industries\//, limit: 2 },
+    solutions: { pattern: /\/solutions\//, limit: 3 },
+    about: { pattern: /\/(about|company|team)\//, limit: 2 },
+    resources: { pattern: /\/(resources?|downloads?)\//, limit: 2 }
+  };
+  
+  const categorized = { uncategorized: [] };
+  
+  // Categorize URLs
+  urls.forEach(url => {
+    let categorized_flag = false;
+    
+    for (const [category, config] of Object.entries(patterns)) {
+      if (config.pattern.test(url)) {
+        if (!categorized[category]) {
+          categorized[category] = [];
+        }
+        categorized[category].push(url);
+        categorized_flag = true;
+        break;
+      }
+    }
+    
+    if (!categorized_flag) {
+      categorized.uncategorized.push(url);
+    }
+  });
+  
+  const result = [];
+  
+  // Apply limits to each category
+  Object.entries(categorized).forEach(([category, categoryUrls]) => {
+    if (category === 'uncategorized') {
+      // Add all uncategorized URLs (likely unique pages)
+      result.push(...categoryUrls);
+    } else {
+      const limit = patterns[category]?.limit || 2;
+      // Sort by URL simplicity (shorter is often more important)
+      const sorted = categoryUrls.sort((a, b) => a.length - b.length);
+      result.push(...sorted.slice(0, limit));
+    }
+  });
+  
+  return result;
+}
+
+/**
+ * Remove URLs that are too similar to each other
+ * @param {string[]} urls - URLs to deduplicate
+ * @param {number} similarityThreshold - Similarity threshold (0-1)
+ * @returns {string[]} URLs with similar ones removed
+ */
+function removeSimilarUrls(urls, similarityThreshold = 0.8) {
+  const result = [];
+  
+  for (const url of urls) {
+    let isSimilar = false;
+    
+    for (const existing of result) {
+      if (calculateUrlSimilarity(url, existing) > similarityThreshold) {
+        isSimilar = true;
+        break;
+      }
+    }
+    
+    if (!isSimilar) {
+      result.push(url);
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * Calculate similarity between two URLs
+ * @param {string} url1 - First URL
+ * @param {string} url2 - Second URL
+ * @returns {number} Similarity score (0-1)
+ */
+function calculateUrlSimilarity(url1, url2) {
+  try {
+    const path1 = new URL(url1).pathname.split('/').filter(p => p);
+    const path2 = new URL(url2).pathname.split('/').filter(p => p);
+    
+    // If they have different number of path segments, less similar
+    const lengthDiff = Math.abs(path1.length - path2.length);
+    const maxLength = Math.max(path1.length, path2.length);
+    
+    if (maxLength === 0) return 1; // Both are root paths
+    
+    let matchingSegments = 0;
+    const minLength = Math.min(path1.length, path2.length);
+    
+    for (let i = 0; i < minLength; i++) {
+      if (path1[i] === path2[i]) {
+        matchingSegments++;
+      } else {
+        break; // Stop at first difference in path hierarchy
+      }
+    }
+    
+    // Calculate similarity based on matching segments and length difference
+    const similarity = (matchingSegments / maxLength) - (lengthDiff / maxLength * 0.3);
+    return Math.max(0, similarity);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Main function to apply all diversity enhancements
+ * @param {string[]} urls - Original URL list
+ * @param {Object} options - Configuration options
+ * @returns {string[]} Filtered diverse URL list
+ */
+function applyUrlDiversityFilters(urls, options = {}) {
+  console.log(`🔍 Applying diversity filters to ${urls.length} URLs...`);
+  
+  // Step 1: Remove obviously similar URLs
+  let filtered = removeSimilarUrls(urls, options.similarityThreshold || 0.7);
+  console.log(`   After similarity filter: ${filtered.length} URLs`);
+  
+  // Step 2: Apply intelligent pattern-based filtering
+  filtered = intelligentUrlFilter(filtered);
+  console.log(`   After pattern filter: ${filtered.length} URLs`);
+  
+  // Step 3: Apply category-based diversity enhancement
+  filtered = enhanceUrlDiversity(filtered, {
+    maxPerCategory: options.maxPerCategory || 2,
+    prioritizeHigherLevels: options.prioritizeHigherLevels !== false
+  });
+  console.log(`   After diversity enhancement: ${filtered.length} URLs`);
+  
+  return filtered;
 }
 
 module.exports = {
@@ -526,5 +636,10 @@ module.exports = {
   limitUrlsPerCategory,
   extractDomain,
   formatDuration,
-  deduplicateUrls
+  deduplicateUrls,
+  enhanceUrlDiversity,
+  intelligentUrlFilter,
+  removeSimilarUrls,
+  calculateUrlSimilarity,
+  applyUrlDiversityFilters
 };

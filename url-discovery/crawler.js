@@ -1,5 +1,13 @@
 const { chromium } = require('playwright');
-const { isValidUrl, normalizeUrl, isSameDomain, shouldExcludeUrl, createDeduplicationKey, deduplicateUrls } = require('./utils');
+const { 
+  isValidUrl, 
+  normalizeUrl, 
+  isSameDomain, 
+  shouldExcludeUrl, 
+  createDeduplicationKey, 
+  deduplicateUrls,
+  applyUrlDiversityFilters
+} = require('./utils');
 
 class URLCrawler {
   constructor(options = {}) {
@@ -9,6 +17,15 @@ class URLCrawler {
     this.concurrency = options.concurrency || 3;
     this.excludePatterns = options.excludePatterns || [];
     this.fastMode = options.fastMode !== false;
+    
+    // New diversity options
+    this.enableDiversityFilters = options.enableDiversityFilters !== false;
+    this.diversityOptions = {
+      maxPerCategory: options.maxPerCategory || 2,
+      similarityThreshold: options.similarityThreshold || 0.7,
+      prioritizeHigherLevels: options.prioritizeHigherLevels !== false,
+      ...options.diversityOptions
+    };
     
     this.visitedUrls = new Set();
     this.discoveredUrls = new Set();
@@ -23,7 +40,11 @@ class URLCrawler {
       redirectDetected: false,
       originalUrl: null,
       finalUrl: null,
-      startTime: Date.now()
+      startTime: Date.now(),
+      diversityFilteringEnabled: this.enableDiversityFilters,
+      urlsBeforeDiversityFilter: 0,
+      urlsAfterDiversityFilter: 0,
+      urlsRemovedByDiversityFilter: 0
     };
   }
   
@@ -110,71 +131,57 @@ class URLCrawler {
         }
       }
       
+      this.stats.pagesCrawled++;
+      
       if (this.waitTime > 0) {
         await page.waitForTimeout(this.waitTime * 1000);
       }
       
-      const newLinks = await this.extractLinks(page, url);
-      this.stats.pagesCrawled++;
-      return newLinks;
+      const links = await this.extractLinks(page, url);
+      
+      console.log(`  📄 ${url}: found ${links.length} new links`);
+      
+      return links;
       
     } catch (error) {
+      console.log(`  ❌ ${url}: ${error.message}`);
       this.stats.errors++;
       return [];
     } finally {
       if (page) {
-        await page.close().catch(() => {});
+        await page.close();
       }
     }
   }
   
   async processBatch(browser, urls, startIndex) {
-    const promises = urls.map((url, i) => 
-      this.crawlPage(browser, url, startIndex + i + 1)
+    const promises = urls.map((url, index) => 
+      this.crawlPage(browser, url, startIndex + index + 1)
     );
     
-    const results = await Promise.allSettled(promises);
-    
-    const allNewLinks = [];
-    results.forEach((result, i) => {
-      if (result.status === 'fulfilled') {
-        allNewLinks.push(...result.value);
-      } else {
-        this.stats.errors++;
-      }
-    });
-    
-    return allNewLinks;
+    const results = await Promise.all(promises);
+    return results.flat();
   }
   
   async crawl(startUrl) {
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--disable-default-apps',
-        '--no-first-run',
-        '--disable-extensions'
-      ]
+    const browser = await chromium.launch({ 
+      headless: true, 
+      args: ['--no-sandbox', '--disable-setuid-sandbox'] 
     });
     
     try {
       const normalizedStartUrl = normalizeUrl(startUrl);
-      this.urlsToVisit.push(normalizedStartUrl);
+      this.actualBaseUrl = normalizedStartUrl;
+      this.stats.originalUrl = startUrl;
+      
       this.discoveredUrls.add(normalizedStartUrl);
       this.deduplicationKeys.add(createDeduplicationKey(normalizedStartUrl));
-      this.stats.originalUrl = normalizedStartUrl;
+      this.urlsToVisit.push(normalizedStartUrl);
       
       console.log(`🔍 Crawling ${normalizedStartUrl}...`);
+      if (this.enableDiversityFilters) {
+        console.log(`🎯 Diversity filtering enabled (max ${this.diversityOptions.maxPerCategory} per category)`);
+      }
       
       let processedCount = 0;
       
@@ -203,7 +210,21 @@ class URLCrawler {
         processedCount += currentBatch.length;
       }
       
-      const finalUrls = deduplicateUrls(Array.from(this.discoveredUrls));
+      // First apply standard deduplication
+      let finalUrls = deduplicateUrls(Array.from(this.discoveredUrls));
+      
+      // Apply diversity filters if enabled
+      if (this.enableDiversityFilters) {
+        this.stats.urlsBeforeDiversityFilter = finalUrls.length;
+        console.log(`📊 Applying diversity filters to ${finalUrls.length} URLs...`);
+        
+        finalUrls = applyUrlDiversityFilters(finalUrls, this.diversityOptions);
+        
+        this.stats.urlsAfterDiversityFilter = finalUrls.length;
+        this.stats.urlsRemovedByDiversityFilter = this.stats.urlsBeforeDiversityFilter - this.stats.urlsAfterDiversityFilter;
+        
+        console.log(`   ✨ Diversity filters removed ${this.stats.urlsRemovedByDiversityFilter} similar URLs`);
+      }
       
       this.stats.duration = (Date.now() - this.stats.startTime) / 1000;
       this.stats.finalUrlCount = finalUrls.length;
@@ -214,7 +235,7 @@ class URLCrawler {
         this.stats.finalUrl = this.stats.originalUrl;
       }
       
-      console.log(`✅ Found ${finalUrls.length} URLs in ${this.stats.duration.toFixed(1)}s`);
+      console.log(`✅ Found ${finalUrls.length} diverse URLs in ${this.stats.duration.toFixed(1)}s`);
       
       return {
         urls: finalUrls,

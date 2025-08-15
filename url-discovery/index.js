@@ -1,87 +1,123 @@
-const fs = require('fs-extra');
 const path = require('path');
+const fs = require('fs-extra');
 const { URLCrawler } = require('./crawler');
-const { limitUrlsPerCategory, hierarchicalSampling, simpleAggressiveFilter } = require('./utils');
+const { 
+  hierarchicalSampling, 
+  limitUrlsPerCategory, 
+  simpleAggressiveFilter,
+  applyUrlDiversityFilters 
+} = require('./utils');
 
 class URLDiscoveryService {
   constructor(options = {}) {
-    this.maxPages = options.maxPages || 50;
+    this.maxPages = options.maxPages || 20;
     this.timeout = options.timeout || 8000;
     this.waitTime = options.waitTime || 0.5;
     this.concurrency = options.concurrency || 3;
-    this.fastMode = options.fastMode !== undefined ? options.fastMode : true;
-    this.excludePatterns = options.excludePatterns || [];
+    this.fastMode = options.fastMode !== false;
     this.outputDir = options.outputDir || './data';
+    this.excludePatterns = options.excludePatterns || [];
+    
+    // Enhanced diversity options
+    this.enableDiversityFilters = options.enableDiversityFilters !== false;
+    this.maxPerCategory = options.maxPerCategory || 2;
+    this.similarityThreshold = options.similarityThreshold || 0.7;
+    this.prioritizeHigherLevels = options.prioritizeHigherLevels !== false;
+    
+    // Legacy options for backward compatibility
+    this.enableHierarchicalSampling = options.enableHierarchicalSampling || false;
+    this.enableCategoryLimiting = options.enableCategoryLimiting || false;
     this.maxUrlsPerCategory = options.maxUrlsPerCategory || 5;
-    this.enableCategoryLimiting = options.enableCategoryLimiting !== undefined ? options.enableCategoryLimiting : true;
-    this.enableHierarchicalSampling = options.enableHierarchicalSampling !== undefined ? options.enableHierarchicalSampling : true;
-
-    this.hierarchicalOptions = {
-      maxDepth: options.hierarchicalOptions?.maxDepth || options.maxDepth || 3,
-      samplesPerCategory: options.hierarchicalOptions?.samplesPerCategory || options.samplesPerCategory || 2,
-      prioritizeOverviews: options.hierarchicalOptions?.prioritizeOverviews !== undefined ? options.hierarchicalOptions.prioritizeOverviews : true,
-      skipLegalPages: options.hierarchicalOptions?.skipLegalPages !== undefined ? options.hierarchicalOptions.skipLegalPages : true,
-      maxUrlsTotal: options.hierarchicalOptions?.maxUrlsTotal || options.maxUrlsTotal || 10
-    };
+    this.maxUrlsTotal = options.maxUrlsTotal || 50;
   }
-
+  
   async discover(startUrl) {
     const startTime = Date.now();
+    console.log(`🔍 Starting URL discovery for: ${startUrl}`);
     
     try {
-      const excludePatterns = this.excludePatterns.map(pattern => {
-        return typeof pattern === 'string' ? new RegExp(pattern) : pattern;
-      });
-      
+      // Initialize crawler with all options including diversity filters
       const crawler = new URLCrawler({
         maxPages: this.maxPages,
         timeout: this.timeout,
-        waitTime: parseFloat(this.waitTime) || 0.5,
+        waitTime: this.waitTime,
         concurrency: this.concurrency,
         fastMode: this.fastMode,
-        excludePatterns: excludePatterns
+        excludePatterns: this.excludePatterns,
+        
+        // Pass diversity options to crawler
+        enableDiversityFilters: this.enableDiversityFilters,
+        maxPerCategory: this.maxPerCategory,
+        similarityThreshold: this.similarityThreshold,
+        prioritizeHigherLevels: this.prioritizeHigherLevels,
+        diversityOptions: {
+          maxPerCategory: this.maxPerCategory,
+          similarityThreshold: this.similarityThreshold,
+          prioritizeHigherLevels: this.prioritizeHigherLevels
+        }
       });
       
+      // Crawl and get diverse URLs
       const results = await crawler.crawl(startUrl);
+      
+      if (!results.success && results.urls.length === 0) {
+        throw new Error('No URLs were discovered during crawling');
+      }
       
       let finalUrls = results.urls;
       
-      // Apply hierarchical sampling if enabled
-      if (this.enableHierarchicalSampling) {
-        finalUrls = hierarchicalSampling(finalUrls, this.hierarchicalOptions);
+      // Legacy processing for backward compatibility (if diversity filters disabled)
+      if (!this.enableDiversityFilters) {
+        console.log(`📊 Applying legacy filters to ${finalUrls.length} URLs...`);
+        
+        // Apply hierarchical sampling if enabled
+        if (this.enableHierarchicalSampling) {
+          console.log(`🔄 Applying hierarchical sampling (max ${this.maxUrlsTotal})...`);
+          finalUrls = hierarchicalSampling(finalUrls, this.maxUrlsTotal);
+          console.log(`   After hierarchical sampling: ${finalUrls.length} URLs`);
+        }
+        
+        // Apply category limiting if enabled
+        if (this.enableCategoryLimiting) {
+          console.log(`🔄 Applying category limiting (max ${this.maxUrlsPerCategory} per category)...`);
+          finalUrls = limitUrlsPerCategory(finalUrls, this.maxUrlsPerCategory);
+          console.log(`   After category limiting: ${finalUrls.length} URLs`);
+        }
+        
+        // Apply total URL limit
+        if (finalUrls.length > this.maxUrlsTotal) {
+          console.log(`🔄 Applying total limit (max ${this.maxUrlsTotal})...`);
+          finalUrls = finalUrls.slice(0, this.maxUrlsTotal);
+        }
+        
+        // Apply final aggressive filter
+        finalUrls = simpleAggressiveFilter(finalUrls);
       }
       
-      // Apply category limiting if enabled
-      if (this.enableCategoryLimiting) {
-        finalUrls = limitUrlsPerCategory(finalUrls, this.maxUrlsPerCategory);
-      }
-
-      // Apply final hard limit
-      const maxUrlsTotal = this.hierarchicalOptions.maxUrlsTotal || 10;
-      if (finalUrls.length > maxUrlsTotal) {
-        console.log(`📊 Limiting to ${maxUrlsTotal} URLs (reduced from ${finalUrls.length})`);
-        finalUrls = finalUrls.slice(0, maxUrlsTotal);
-      }
-
-      // Apply final aggressive filter
-      finalUrls = simpleAggressiveFilter(finalUrls);
       const duration = (Date.now() - startTime) / 1000;
       
-      // Save files
+      // Ensure output directory exists
       await fs.ensureDir(this.outputDir);
       
+      // Create comprehensive data structure
       const fullData = {
         discoveredAt: new Date().toISOString(),
         baseUrl: startUrl,
         finalBaseUrl: results.stats.finalUrl || startUrl,
-        totalDiscovered: results.stats.totalUrlsDiscovered,
-        totalAfterDeduplication: results.urls.length,
+        totalDiscovered: results.stats.totalUrlsDiscovered || finalUrls.length,
+        totalAfterDeduplication: results.stats.urlsBeforeDiversityFilter || finalUrls.length,
         finalUrlCount: finalUrls.length,
         processingStats: {
+          diversityFilteringEnabled: this.enableDiversityFilters,
+          maxPerCategory: this.maxPerCategory,
+          similarityThreshold: this.similarityThreshold,
+          urlsRemovedByDiversityFilter: results.stats.urlsRemovedByDiversityFilter || 0,
+          
+          // Legacy stats for backward compatibility
           hierarchicalSamplingEnabled: this.enableHierarchicalSampling,
           categoryLimitingEnabled: this.enableCategoryLimiting,
           maxUrlsPerCategory: this.maxUrlsPerCategory,
-          maxUrlsTotal: maxUrlsTotal
+          maxUrlsTotal: this.maxUrlsTotal
         },
         crawlStats: results.stats,
         urls: finalUrls.map(url => ({
@@ -91,6 +127,7 @@ class URLDiscoveryService {
         }))
       };
 
+      // Save files
       const urlsPath = path.join(this.outputDir, 'urls.json');
       const simpleUrlsPath = path.join(this.outputDir, 'urls_simple.json');
       
@@ -98,7 +135,7 @@ class URLDiscoveryService {
       await fs.writeJson(simpleUrlsPath, finalUrls, { spaces: 2 });
 
       console.log(`💾 Saved ${finalUrls.length} URLs to data files`);
-
+      
       return {
         success: true,
         urls: finalUrls,
@@ -106,7 +143,9 @@ class URLDiscoveryService {
           ...results.stats,
           duration,
           finalUrlCount: finalUrls.length,
-          totalProcessed: results.stats.totalUrlsDiscovered
+          totalProcessed: results.stats.totalUrlsDiscovered || finalUrls.length,
+          diversityFilteringEnabled: this.enableDiversityFilters,
+          urlsRemovedByDiversityFilter: results.stats.urlsRemovedByDiversityFilter || 0
         },
         files: {
           urls: urlsPath,
@@ -120,7 +159,10 @@ class URLDiscoveryService {
         success: false,
         error: error.message,
         urls: [],
-        stats: { duration: (Date.now() - startTime) / 1000 }
+        stats: { 
+          duration: (Date.now() - startTime) / 1000,
+          diversityFilteringEnabled: this.enableDiversityFilters
+        }
       };
     }
   }

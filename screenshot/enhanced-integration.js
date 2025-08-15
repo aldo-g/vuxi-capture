@@ -4,6 +4,7 @@ const path = require('path');
 const { InteractiveContentCapture } = require('./interactive-capture');
 const { ScreenshotEnhancer } = require('./enhancer');
 const { createFilename } = require('./utils');
+const { ImageDeduplicationService } = require('./image-deduplication');
 
 class EnhancedScreenshotCapture {
   constructor(outputDir, options = {}) {
@@ -100,7 +101,8 @@ class EnhancedScreenshotCapture {
         
         for (let i = 0; i < screenshots.length; i++) {
           const screenshot = screenshots[i];
-          const filename = createEnhancedFilename(url, index, i);
+          const type = screenshot.filename.replace('.png', '');
+          const filename = createEnhancedFilename(url, index, i, type);
           const filepath = path.join(this.screenshotsDir, filename);
           
           try {
@@ -110,6 +112,7 @@ class EnhancedScreenshotCapture {
               continue;
             }
           } catch (saveError) {
+             console.error(`   - Error saving screenshot ${filename}: ${saveError.message}`);
             continue;
           }
           
@@ -117,10 +120,12 @@ class EnhancedScreenshotCapture {
             url: url,
             filename: filename,
             path: `desktop/${filename}`,
+            filepath: filepath,
             timestamp: screenshot.timestamp,
             type: screenshot.filename.includes('baseline') ? 'baseline' : 'interactive',
             screenshotIndex: i,
-            totalScreenshots: screenshots.length
+            totalScreenshots: screenshots.length,
+            buffer: screenshot.buffer
           });
         }
         
@@ -138,7 +143,7 @@ class EnhancedScreenshotCapture {
         const filename = createFilename(url, index);
         const filepath = path.join(this.screenshotsDir, filename);
         
-        await page.screenshot({
+        const buffer = await page.screenshot({
           path: filepath,
           fullPage: true,
           type: 'png'
@@ -148,10 +153,12 @@ class EnhancedScreenshotCapture {
           url: url,
           filename: filename,
           path: `desktop/${filename}`,
+          filepath: filepath,
           timestamp: new Date().toISOString(),
           type: 'standard',
           screenshotIndex: 0,
-          totalScreenshots: 1
+          totalScreenshots: 1,
+          buffer: buffer
         });
       }
       
@@ -217,38 +224,63 @@ class EnhancedScreenshotService {
         allResults.push(...batchResults);
       }
       
-      const successful = allResults.filter(r => r.success);
-      const failed = allResults.filter(r => !r.success);
+      const successfulCaptures = allResults.filter(r => r.success).map(r => r.data).flat();
+      const failedCaptures = allResults.filter(r => !r.success);
+      
+      // --- GLOBAL DEDUPLICATION ---
+      console.log(`\n🔍 Starting global deduplication of ${successfulCaptures.length} total screenshots...`);
+      const dedupService = new ImageDeduplicationService({
+          similarityThreshold: 98,
+          preserveFirst: true,
+          verbose: true
+      });
+      const uniqueScreenshots = await dedupService.processScreenshots(successfulCaptures);
+      console.log(`✅ Global deduplication complete. Kept ${uniqueScreenshots.length} unique screenshots.`);
+
+      const uniqueFilenames = new Set(uniqueScreenshots.map(s => s.filename));
+      const duplicateScreenshots = successfulCaptures.filter(s => !uniqueFilenames.has(s.filename));
+
+      if (duplicateScreenshots.length > 0) {
+          console.log(`🗑️  Removing ${duplicateScreenshots.length} duplicate screenshot files...`);
+          for (const duplicate of duplicateScreenshots) {
+              try {
+                  await fs.remove(duplicate.filepath);
+                  console.log(`   - Removed: ${duplicate.filename}`);
+              } catch (e) {
+                  console.error(`   - Error removing ${duplicate.filename}: ${e.message}`);
+              }
+          }
+      }
+      // --- END GLOBAL DEDUPLICATION ---
+
       const duration = (Date.now() - startTime) / 1000;
+      const totalScreenshots = uniqueScreenshots.length;
       
-      const totalScreenshots = successful.reduce((total, result) => {
-        return total + (Array.isArray(result.data) ? result.data.length : 1);
-      }, 0);
-      
+      // Remove buffer before writing metadata
+      const finalSuccessful = uniqueScreenshots.map(({ buffer, filepath, ...rest }) => rest);
+
       const metadata = {
         timestamp: new Date().toISOString(),
         duration_seconds: duration,
         total_urls: urls.length,
-        successful_captures: successful.length,
-        failed_captures: failed.length,
+        successful_captures: finalSuccessful.length,
+        failed_captures: failedCaptures.length,
         total_screenshots: totalScreenshots,
         interactive_capture_enabled: this.enableInteractiveCapture,
-        average_screenshots_per_page: successful.length > 0 ? 
-          (totalScreenshots / successful.length).toFixed(1) : '0.0',
-        interactive_pages_found: successful.filter(r => 
-          Array.isArray(r.data) && r.data.length > 1
-        ).length
+        average_screenshots_per_page: finalSuccessful.length > 0 ? 
+          (totalScreenshots / finalSuccessful.length).toFixed(1) : '0.0',
+        interactive_pages_found: finalSuccessful.filter(r => r.totalScreenshots > 1).length
       };
       
       const metadataPath = path.join(this.outputDir, 'enhanced_metadata.json');
       await fs.writeJson(metadataPath, metadata, { spaces: 2 });
       
-      console.log(`✅ Captured ${totalScreenshots} screenshots from ${successful.length}/${urls.length} pages (${duration.toFixed(1)}s)`);
+      console.log(`✅ Captured ${totalScreenshots} screenshots from ${finalSuccessful.length}/${urls.length} pages (${duration.toFixed(1)}s)`);
       
       return {
-        success: successful.length > 0,
-        successful: successful.map(r => r.data).flat(),
-        failed: failed.map(r => ({ url: r.url, error: r.error })),
+        success: finalSuccessful.length > 0,
+        successful: finalSuccessful,
+        failed: failedCaptures.map(r => ({ url: r.url, error: r.error })),
         stats: {
           totalScreenshots,
           averageScreenshotsPerPage: metadata.average_screenshots_per_page,
@@ -299,10 +331,12 @@ class EnhancedScreenshotService {
   }
 }
 
-function createEnhancedFilename(url, index, screenshotIndex) {
-  const baseFilename = createFilename(url, index);
-  const nameWithoutExt = baseFilename.replace('.png', '');
-  return `${nameWithoutExt}_${screenshotIndex.toString().padStart(2, '0')}.png`;
+function createEnhancedFilename(url, index, screenshotIndex, type = 'interactive') {
+    const baseFilename = createFilename(url, index);
+    const nameWithoutExt = baseFilename.replace('.png', '');
+    const safeType = type.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+    return `${nameWithoutExt}_${screenshotIndex.toString().padStart(2, '0')}_${safeType}.png`;
 }
+
 
 module.exports = { EnhancedScreenshotService, EnhancedScreenshotCapture };
