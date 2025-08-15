@@ -133,15 +133,6 @@ class InteractiveContentCapture {
           const element = newElements[i];
           const signature = this._createElementSignature(element);
           
-          if (this.filterGroupInteracted && element.type === 'explicit') {
-            if(this.filterOptionInteracted) {
-              console.log(`🔄 Skipping extra filter option: "${element.text}"`);
-              this.processedElementSignatures.add(signature);
-              continue;
-            }
-            this.filterOptionInteracted = true;
-          }
-
           // Mark as processed before interaction to avoid reprocessing
           this.processedElementSignatures.add(signature);
           
@@ -158,12 +149,11 @@ class InteractiveContentCapture {
           this.totalInteractions++;
           interactedInRound = true;
 
-          if (element.text.toLowerCase().includes('filter')) {
-            this.filterGroupInteracted = true;
-          }
-
           // Check if this interaction caused significant changes that might reveal new elements
           if (interactionResult && interactionResult.success) {
+            if (element.text.toLowerCase().includes('filter')) {
+                this.filterGroupInteracted = true;
+            }
             // Wait for any animations or dynamic content to settle
             await this.page.waitForTimeout(500);
             

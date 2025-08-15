@@ -213,8 +213,8 @@ class URLCrawler {
       // First apply standard deduplication
       let finalUrls = deduplicateUrls(Array.from(this.discoveredUrls));
       
-      // Apply diversity filters if enabled
-      if (this.enableDiversityFilters) {
+      // Apply diversity filters if enabled and URL count is above 10
+      if (this.enableDiversityFilters && finalUrls.length > 10) {
         this.stats.urlsBeforeDiversityFilter = finalUrls.length;
         console.log(`📊 Applying diversity filters to ${finalUrls.length} URLs...`);
         
@@ -224,6 +224,8 @@ class URLCrawler {
         this.stats.urlsRemovedByDiversityFilter = this.stats.urlsBeforeDiversityFilter - this.stats.urlsAfterDiversityFilter;
         
         console.log(`   ✨ Diversity filters removed ${this.stats.urlsRemovedByDiversityFilter} similar URLs`);
+      } else if (this.enableDiversityFilters) {
+        console.log(`ℹ️  Skipping diversity filters: ${finalUrls.length} URLs found (threshold is 10)`);
       }
       
       this.stats.duration = (Date.now() - this.stats.startTime) / 1000;
