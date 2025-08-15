@@ -7,13 +7,11 @@ class InteractionEngine {
     this.env = env;
     this.waits = waits;
     this.changes = changes;
-    // this.regions = regions; // No longer needed
     this.screenshotter = screenshotter;
     this.interactionHistory = interactionHistoryRef;
     this.baselineState = null;
   }
 
-  // Capture the baseline state of the page for restoration
   async captureBaselineState() {
     console.log('📄 Capturing baseline page state...');
     this.baselineState = await this.page.evaluate(() => {
@@ -26,7 +24,6 @@ class InteractionEngine {
     console.log('✅ Baseline state captured');
   }
 
-  // Re-apply the data-button-text attributes and other identifiers
   async reapplyElementIdentifiers() {
     await this.page.evaluate(() => {
       document.querySelectorAll('button').forEach(button => {
@@ -41,13 +38,12 @@ class InteractionEngine {
     });
   }
 
-  // Restore the page to its baseline state
   async restoreToBaselineState() {
     if (!this.baselineState) return false;
     try {
       const currentUrl = this.page.url();
       if (currentUrl !== this.baselineState.url) {
-        console.log(`🔄 Navigating back to baseline URL: ${this.baselineState.url}`);
+        console.log(`⚠️  Attempted to restore baseline from an unexpected URL. Navigating back.`);
         await this.page.goto(this.baselineState.url, { waitUntil: 'networkidle' });
       } else {
          await this.page.evaluate(baseState => {
@@ -67,7 +63,6 @@ class InteractionEngine {
     try {
       console.log(`🎯 Interacting with element ${index + 1}: ${elementData.type} - "${(elementData.text || '').substring(0, 50)}"`);
 
-      // NEW: Simplified interaction logic
       const clickRes = await this.page.evaluate((selector) => {
         try {
           const el = document.querySelector(selector);
@@ -75,7 +70,7 @@ class InteractionEngine {
           const r = el.getBoundingClientRect();
           if (r.width === 0 || r.height === 0) return { success: false, reason: 'Element not visible' };
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          setTimeout(() => el.click(), 150); // Slightly increased delay for stability
+          setTimeout(() => el.click(), 150);
           return { success: true };
         } catch (e) { return { success: false, reason: e.message }; }
       }, elementData.selector);
@@ -90,28 +85,38 @@ class InteractionEngine {
         type: elementData.type,
         text: elementData.text
       });
-
-      // Wait for the page to settle after the click
+      
       await this.page.waitForTimeout(this.options.interactionDelay + 500);
+      
+      const navigated = this.page.url() !== this.baselineState.url;
+
+      if (navigated) {
+        console.log(`   ➡️  Navigation detected to: ${this.page.url()}`);
+        console.log('   📸 Skipping screenshot for new URL.');
+        console.log(`   ↩️  Returning to baseline URL to continue other interactions...`);
+        await this.page.goto(this.baselineState.url, { waitUntil: 'networkidle' });
+        await this.reapplyElementIdentifiers();
+        return { success: true, navigated: true }; // Return early
+      }
+
+      // If we are here, it means we did NOT navigate.
       await this.waits.waitForAnimations();
       await this.waits.validator.waitForImages();
 
-      // **THE FIX**: Always take a full-page screenshot after every interaction
       const safeLabel = (elementData.text || elementData.type).replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
       await this.screenshotter.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${safeLabel}`, {
-          force: true, // Force the screenshot
+          force: true,
           tags: [elementData.type]
       });
 
-      // Restore the page to its original state to prepare for the next interaction
-      console.log(`   🔄 Restoring to baseline state after interaction`);
+      console.log(`   🔄 Restoring to baseline state after on-page interaction`);
       await this.restoreToBaselineState();
 
-      return { success: true };
+      return { success: true, navigated: false };
 
     } catch (error) {
       console.error(`❌ Error interacting with element ${index + 1}:`, error.message);
-      await this.restoreToBaselineState();
+      await this.page.goto(this.baselineState.url, { waitUntil: 'networkidle' });
       return null;
     }
   }
