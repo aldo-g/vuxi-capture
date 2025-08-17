@@ -28,6 +28,7 @@ class InteractiveContentCapture {
     this.maxInteractionsReached = false;
     this.filterGroupInteracted = false;
     this.filterOptionInteracted = false;
+    this.failedElements = new Set(); // Track elements that failed to be found
 
     // Subsystems
     this.env = new EnvironmentGuard(this.page);
@@ -76,6 +77,29 @@ class InteractiveContentCapture {
     console.log(`🔍 Discovered ${allElements.length} total elements, ${newElements.length} new elements to process`);
     
     return newElements;
+  }
+
+  // Refresh page and rediscover baseline elements
+  async _refreshAndRediscoverBaseline() {
+    console.log(`   🔄 Refreshing page to rediscover baseline elements...`);
+    
+    // Go back to baseline URL
+    await this.page.goto(this.interactor.baselineState.url, { 
+      waitUntil: 'networkidle',
+      timeout: 30000 
+    });
+    
+    // Wait for page to fully load
+    await this.waits.waitForCompletePageLoadWithValidation();
+    await this.page.waitForTimeout(1000);
+    
+    // Reapply element identifiers
+    await this.interactor.reapplyElementIdentifiers();
+    
+    // Capture new baseline state
+    await this.interactor.captureBaselineState();
+    
+    console.log(`   ✅ Page refreshed and baseline state recaptured`);
   }
 
   async captureInteractiveContent() {
@@ -144,24 +168,66 @@ class InteractiveContentCapture {
             await this.page.waitForTimeout(300);
           }
           
-          // Interact with the element (state restoration is handled within interactWithElement)
+          // Try to interact with the element
           const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
-          this.totalInteractions++;
-          interactedInRound = true;
-
-          // Check if this interaction caused significant changes that might reveal new elements
-          if (interactionResult && interactionResult.success) {
-            if (element.text.toLowerCase().includes('filter')) {
-                this.filterGroupInteracted = true;
-            }
-            // Wait for any animations or dynamic content to settle
-            await this.page.waitForTimeout(500);
+          
+          // If interaction failed due to element not found, try refreshing and retrying
+          if (!interactionResult || !interactionResult.success) {
+            const signature = this._createElementSignature(element);
             
-            // Only check for immediate new content if we're still in baseline state
-            // (since we restore after each interaction)
-            const immediateNewElements = await this._discoverNewElements();
-            if (immediateNewElements.length > 0) {
-              console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after interaction`);
+            // If we haven't already failed this element, try refreshing page and retrying
+            if (!this.failedElements.has(signature)) {
+              console.log(`   🔄 Element not found, refreshing page and retrying...`);
+              this.failedElements.add(signature);
+              
+              // Refresh page and rediscover baseline
+              await this._refreshAndRediscoverBaseline();
+              
+              // Try interaction again
+              const retryResult = await this.interactor.interactWithElement(element, this.totalInteractions);
+              
+              if (retryResult && retryResult.success) {
+                console.log(`   ✅ Retry successful after page refresh`);
+                this.totalInteractions++;
+                interactedInRound = true;
+                
+                // Check for new elements after successful retry
+                if (retryResult.success) {
+                  if (element.text.toLowerCase().includes('filter')) {
+                    this.filterGroupInteracted = true;
+                  }
+                  await this.page.waitForTimeout(500);
+                  
+                  const immediateNewElements = await this._discoverNewElements();
+                  if (immediateNewElements.length > 0) {
+                    console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after retry`);
+                  }
+                }
+              } else {
+                console.log(`   ❌ Retry also failed, skipping element`);
+              }
+            } else {
+              console.log(`   ❌ Element already failed before, skipping`);
+            }
+          } else {
+            // Successful interaction
+            this.totalInteractions++;
+            interactedInRound = true;
+
+            // Check if this interaction caused significant changes that might reveal new elements
+            if (interactionResult.success) {
+              if (element.text.toLowerCase().includes('filter')) {
+                this.filterGroupInteracted = true;
+              }
+              // Wait for any animations or dynamic content to settle
+              await this.page.waitForTimeout(500);
+              
+              // Only check for immediate new content if we're still in baseline state
+              // (since we restore after each interaction)
+              const immediateNewElements = await this._discoverNewElements();
+              if (immediateNewElements.length > 0) {
+                console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after interaction`);
+              }
             }
           }
 
@@ -177,8 +243,9 @@ class InteractiveContentCapture {
             break;
           }
         }
+        
         if (!interactedInRound) {
-            consecutiveEmptyRounds++;
+          consecutiveEmptyRounds++;
         }
 
         // Store discovered elements for reporting
@@ -206,67 +273,25 @@ class InteractiveContentCapture {
         verbose: true
       });
       const uniqueScreenshots = await dedup.processScreenshots(this.screenshotter.screenshots);
-      
-      // Preserve important screenshots with specific tags
-      const keepTags = new Set(['anchor', 'tabpanel', 'tabs']);
-      const names = new Set(uniqueScreenshots.map(u => u.filename));
-      this.screenshotter.screenshots.forEach(s => {
-        const tags = new Set(s.tags || []);
-        if ([...tags].some(t => keepTags.has(t)) && !names.has(s.filename)) {
-          uniqueScreenshots.push(s);
-          names.add(s.filename);
-        }
-      });
-      
-      this.screenshotter.screenshots = uniqueScreenshots;
       this.deduplicationReport = dedup.getDeduplicationReport();
 
+      this.screenshots = uniqueScreenshots;
+      
       // Sync public state
       this._syncScreenshots();
       
+      // Return screenshots array for backward compatibility with enhanced-integration.js
       return this.screenshots;
+
     } catch (error) {
-      console.error('❌ Error in interactive content capture:', error);
+      console.error('❌ Interactive content capture failed:', error);
       this._syncScreenshots();
-      return this.screenshots;
+      throw error; // Re-throw to let enhanced-integration handle it
     }
   }
 
   _syncScreenshots() {
     this.screenshots = [...this.screenshotter.screenshots];
-  }
-
-  // Helper method to reset state for new capture
-  reset() {
-    this.screenshots = [];
-    this.interactionHistory.clear();
-    this.discoveredElements = [];
-    this.deduplicationReport = null;
-    this.processedElementSignatures.clear();
-    this.totalInteractions = 0;
-    this.maxInteractionsReached = false;
-    this.screenshotter.screenshots = [];
-    this.filterGroupInteracted = false;
-    this.filterOptionInteracted = false;
-    
-    // Reset baseline state in interactor
-    if (this.interactor) {
-      this.interactor.baselineState = null;
-    }
-  }
-
-  // Enhanced reporting method for backward compatibility
-  getCaptureReport() {
-    return {
-      totalScreenshots: this.screenshots.length,
-      totalInteractions: this.totalInteractions,
-      uniqueElementsProcessed: this.processedElementSignatures.size,
-      discoveredElements: this.discoveredElements.length,
-      deduplication: this.deduplicationReport || null,
-      interactionHistory: Array.from(this.interactionHistory.entries()),
-      elementSignatures: Array.from(this.processedElementSignatures),
-      baselineStateRestored: !!this.interactor.baselineState
-    };
   }
 }
 
