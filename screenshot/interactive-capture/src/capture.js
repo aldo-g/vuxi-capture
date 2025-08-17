@@ -290,6 +290,15 @@ class InteractiveContentCapture {
     }
   }
 
+  getCaptureReport() {
+    return {
+      totalInteractions: this.totalInteractions,
+      totalScreenshots: this.screenshots.length,
+      uniqueElementsProcessed: this.processedElementSignatures.size,
+      deduplicationReport: this.deduplicationReport,
+    };
+  }
+
   _syncScreenshots() {
     this.screenshots = [...this.screenshotter.screenshots];
   }
