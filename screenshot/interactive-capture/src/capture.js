@@ -103,7 +103,7 @@ class InteractiveContentCapture {
   }
 
   async captureInteractiveContent() {
-    console.log('🚀 Starting interactive content capture with dynamic discovery...');
+    console.log('🚀 Starting interactive content capture...');
     try {
       await this.env.init();
       this.currentPageDomain = this.env.currentDomain;
@@ -116,33 +116,12 @@ class InteractiveContentCapture {
       // IMPORTANT: Capture baseline state after page is fully loaded
       await this.interactor.captureBaselineState();
 
-      let discoveryRound = 0;
-      let consecutiveEmptyRounds = 0;
-      const maxEmptyRounds = 2; // Stop if we have 2 consecutive rounds with no new elements
+      console.log(`\n🔄 Starting a single discovery and interaction round...`);
 
-      // Dynamic discovery loop
-      while (this._shouldContinueProcessing() && consecutiveEmptyRounds < maxEmptyRounds) {
-        discoveryRound++;
-        console.log(`\n🔄 Discovery round ${discoveryRound}`);
-
-        // Discover new elements in current page state
-        const newElements = await this._discoverNewElements();
-        
-        if (newElements.length === 0) {
-          consecutiveEmptyRounds++;
-          console.log(`   ⚠️ No new elements found (empty round ${consecutiveEmptyRounds}/${maxEmptyRounds})`);
-          
-          // If no new elements, wait a bit for any delayed content and try once more
-          if (consecutiveEmptyRounds === 1) {
-            await this.page.waitForTimeout(1000);
-            continue;
-          } else {
-            break;
-          }
-        } else {
-          consecutiveEmptyRounds = 0;
-        }
-
+      // Discover new elements in current page state
+      const newElements = await this._discoverNewElements();
+      
+      if (newElements.length > 0) {
         // Process elements in this round
         const elementsToProcess = Math.min(
           newElements.length, 
@@ -150,10 +129,14 @@ class InteractiveContentCapture {
           this.options.maxScreenshots - this.screenshotter.screenshots.length
         );
 
-        console.log(`   🎯 Processing ${elementsToProcess} elements in this round`);
-        let interactedInRound = false;
+        console.log(`   🎯 Processing ${elementsToProcess} elements`);
 
         for (let i = 0; i < elementsToProcess; i++) {
+          if (!this._shouldContinueProcessing()) {
+            console.log(`   🛑 Stopping: reached interaction or screenshot limit.`);
+            break;
+          }
+
           const element = newElements[i];
           const signature = this._createElementSignature(element);
           
@@ -162,8 +145,8 @@ class InteractiveContentCapture {
           
           console.log(`   📍 Element ${i + 1}/${elementsToProcess}: ${element.type} - "${element.text}"`);
           
-          // Ensure baseline state before each interaction (except the first one)
-          if (this.interactor.baselineState && i > 0) {
+          // Ensure baseline state before each interaction
+          if (this.interactor.baselineState && this.totalInteractions > 0) {
             await this.interactor.restoreToBaselineState();
             await this.page.waitForTimeout(300);
           }
@@ -171,90 +154,35 @@ class InteractiveContentCapture {
           // Try to interact with the element
           const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
           
-          // If interaction failed due to element not found, try refreshing and retrying
-          if (!interactionResult || !interactionResult.success) {
-            const signature = this._createElementSignature(element);
-            
-            // If we haven't already failed this element, try refreshing page and retrying
+          if (interactionResult && interactionResult.success) {
+            this.totalInteractions++;
+          } else {
+             // If interaction failed, try to refresh and retry once
+             const signature = this._createElementSignature(element);
             if (!this.failedElements.has(signature)) {
               console.log(`   🔄 Element not found, refreshing page and retrying...`);
               this.failedElements.add(signature);
               
-              // Refresh page and rediscover baseline
               await this._refreshAndRediscoverBaseline();
               
-              // Try interaction again
               const retryResult = await this.interactor.interactWithElement(element, this.totalInteractions);
               
               if (retryResult && retryResult.success) {
                 console.log(`   ✅ Retry successful after page refresh`);
                 this.totalInteractions++;
-                interactedInRound = true;
-                
-                // Check for new elements after successful retry
-                if (retryResult.success) {
-                  if (element.text.toLowerCase().includes('filter')) {
-                    this.filterGroupInteracted = true;
-                  }
-                  await this.page.waitForTimeout(500);
-                  
-                  const immediateNewElements = await this._discoverNewElements();
-                  if (immediateNewElements.length > 0) {
-                    console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after retry`);
-                  }
-                }
               } else {
                 console.log(`   ❌ Retry also failed, skipping element`);
               }
             } else {
               console.log(`   ❌ Element already failed before, skipping`);
             }
-          } else {
-            // Successful interaction
-            this.totalInteractions++;
-            interactedInRound = true;
-
-            // Check if this interaction caused significant changes that might reveal new elements
-            if (interactionResult.success) {
-              if (element.text.toLowerCase().includes('filter')) {
-                this.filterGroupInteracted = true;
-              }
-              // Wait for any animations or dynamic content to settle
-              await this.page.waitForTimeout(500);
-              
-              // Only check for immediate new content if we're still in baseline state
-              // (since we restore after each interaction)
-              const immediateNewElements = await this._discoverNewElements();
-              if (immediateNewElements.length > 0) {
-                console.log(`   🆕 Found ${immediateNewElements.length} immediate new elements after interaction`);
-              }
-            }
-          }
-
-          // Add some breathing room between interactions
-          if (i < elementsToProcess - 1) {
-            await this.page.waitForTimeout(200);
-          }
-
-          // Check if we've hit our limits
-          if (!this._shouldContinueProcessing()) {
-            console.log(`   🛑 Stopping: reached interaction limit (${this.totalInteractions}/${this.options.maxInteractions}) or screenshot limit`);
-            this.maxInteractionsReached = true;
-            break;
           }
         }
-        
-        if (!interactedInRound) {
-          consecutiveEmptyRounds++;
-        }
-
-        // Store discovered elements for reporting
-        this.discoveredElements.push(...newElements.slice(0, elementsToProcess));
-
-        console.log(`   ✅ Round ${discoveryRound} complete. Total interactions: ${this.totalInteractions}, Screenshots: ${this.screenshotter.screenshots.length}`);
+      } else {
+        console.log("   ⚠️ No interactive elements found in the single discovery round.");
       }
 
-      console.log(`\n🏁 Dynamic discovery complete after ${discoveryRound} rounds`);
+      console.log(`\n🏁 Interaction round complete.`);
       console.log(`   📊 Total interactions: ${this.totalInteractions}`);
       console.log(`   📸 Total screenshots before deduplication: ${this.screenshotter.screenshots.length}`);
       console.log(`   🔍 Unique elements processed: ${this.processedElementSignatures.size}`);
