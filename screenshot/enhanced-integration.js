@@ -22,6 +22,8 @@ class EnhancedScreenshotCapture {
       maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
       interactionDelay: options.interactionDelay || 800,
       enableInteractiveCapture: options.enableInteractiveCapture !== false,
+      changeDetectionTimeout: options.changeDetectionTimeout || 2000,
+      maxInteractionsPerType: options.maxInteractionsPerType || 3, // Added this line!
       ...options
     };
 
@@ -94,7 +96,9 @@ class EnhancedScreenshotCapture {
         const interactiveCapture = new InteractiveContentCapture(page, {
           maxInteractions: this.interactiveOptions.maxInteractions,
           maxScreenshots: this.interactiveOptions.maxScreenshotsPerPage,
-          interactionDelay: this.interactiveOptions.interactionDelay
+          interactionDelay: this.interactiveOptions.interactionDelay,
+          changeDetectionTimeout: this.interactiveOptions.changeDetectionTimeout,
+          maxInteractionsPerType: this.interactiveOptions.maxInteractionsPerType // Added this line!
         });
         
         const screenshots = await interactiveCapture.captureInteractiveContent();
@@ -194,6 +198,7 @@ class EnhancedScreenshotService {
     this.maxScreenshotsPerPage = options.maxScreenshotsPerPage || 15;
     this.interactionDelay = options.interactionDelay || 800;
     this.changeDetectionTimeout = options.changeDetectionTimeout || 2000;
+    this.maxInteractionsPerType = options.maxInteractionsPerType || 3; // Added this line!
     
     console.log(`📸 Enhanced Screenshot Service - Interactive: ${this.enableInteractiveCapture ? 'ENABLED' : 'DISABLED'}`);
   }
@@ -212,7 +217,9 @@ class EnhancedScreenshotService {
         enableInteractiveCapture: this.enableInteractiveCapture,
         maxInteractions: this.maxInteractions,
         maxScreenshotsPerPage: this.maxScreenshotsPerPage,
-        interactionDelay: this.interactionDelay
+        interactionDelay: this.interactionDelay,
+        changeDetectionTimeout: this.changeDetectionTimeout,
+        maxInteractionsPerType: this.maxInteractionsPerType // Added this line!
       });
       
       const allResults = [];
@@ -337,6 +344,5 @@ function createEnhancedFilename(url, index, screenshotIndex, type = 'interactive
     const safeType = type.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
     return `${nameWithoutExt}_${screenshotIndex.toString().padStart(2, '0')}_${safeType}.png`;
 }
-
 
 module.exports = { EnhancedScreenshotService, EnhancedScreenshotCapture };

@@ -4,32 +4,21 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs-extra');
 
-// Load environment variables from root .env file
-require('dotenv').config({ path: path.join(__dirname, '../../.env') });
+// Import enhanced services
+const { URLDiscoveryService } = require('./url-discovery');
+const { EnhancedScreenshotService } = require('./screenshot/enhanced-integration');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Import services with error handling
-let URLDiscoveryService, EnhancedScreenshotService;
-try {
-  ({ URLDiscoveryService } = require('./url-discovery'));
-  
-  ({ EnhancedScreenshotService } = require('./screenshot/enhanced-integration'));
-} catch (error) {
-  console.error('❌ Failed to load services:', error);
-  console.error('Make sure the service files exist and export the correct classes');
-  process.exit(1);
-}
-
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// In-memory job storage (in production, use Redis or database)
+// In-memory job storage (replace with database in production)
 const jobs = new Map();
 
-// Job statuses
+// Job status constants
 const JOB_STATUS = {
   PENDING: 'pending',
   RUNNING: 'running',
@@ -40,32 +29,32 @@ const JOB_STATUS = {
 };
 
 // Helper function to update job status
-function updateJobStatus(jobId, status, data = {}) {
+function updateJobStatus(jobId, status, updates = {}) {
   const job = jobs.get(jobId);
   if (job) {
     job.status = status;
     job.updatedAt = new Date().toISOString();
-    Object.assign(job, data);
-    console.log(`📊 Job ${jobId.slice(0,8)}: ${status} - ${data.progress?.message || ''}`);
+    Object.assign(job, updates);
+    jobs.set(jobId, job);
   }
 }
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  const activeJobs = Array.from(jobs.values()).filter(j => 
+    j.status === JOB_STATUS.RUNNING || 
+    j.status === JOB_STATUS.URL_DISCOVERY || 
+    j.status === JOB_STATUS.SCREENSHOT_CAPTURE
+  ).length;
+  
+  res.json({
+    status: 'healthy',
+    service: 'Vuxi Enhanced Capture Service',
+    version: '2.0.0',
     timestamp: new Date().toISOString(),
-    service: 'vuxi-capture-service',
-    version: '2.0.0', // Updated version for enhanced interactive features
-    features: {
-      interactiveCapture: true,
-      multipleScreenshotsPerPage: true,
-      systematicInteractionDiscovery: true,
-      changeDetection: true,
-      elementPrioritization: true
-    },
-    activeJobs: Array.from(jobs.values()).filter(j => 
-      j.status === JOB_STATUS.RUNNING || 
+    activeJobs,
+    totalJobs: jobs.size,
+    runningJobs: Array.from(jobs.values()).filter(j => 
       j.status === JOB_STATUS.URL_DISCOVERY || 
       j.status === JOB_STATUS.SCREENSHOT_CAPTURE
     ).length
@@ -96,7 +85,8 @@ app.get('/', (req, res) => {
       maxInteractions: 'Maximum interactive elements to process per page (default: 30)',
       maxScreenshotsPerPage: 'Maximum screenshots per page (default: 15)',
       interactionDelay: 'Delay between interactions in ms (default: 800)',
-      changeDetectionTimeout: 'Time to wait for content changes after interaction (default: 2000ms)'
+      changeDetectionTimeout: 'Time to wait for content changes after interaction (default: 2000ms)',
+      maxInteractionsPerType: 'Maximum interactions per selector type (default: 3)'
     }
   });
 });
@@ -132,6 +122,7 @@ app.post('/api/capture', async (req, res) => {
         maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
         interactionDelay: options.interactionDelay || 800,
         changeDetectionTimeout: options.changeDetectionTimeout || 2000,
+        maxInteractionsPerType: options.maxInteractionsPerType || 3,
         
         // ADVANCED OPTIONS (optional)
         enableHoverCapture: options.enableHoverCapture || false,
@@ -198,6 +189,7 @@ app.get('/api/capture/:jobId', (req, res) => {
       maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
       maxPages: job.options.maxPages,
       concurrency: job.options.concurrency,
+      maxInteractionsPerType: job.options.maxInteractionsPerType,
       
       // Advanced options
       enableHoverCapture: job.options.enableHoverCapture,
@@ -224,7 +216,8 @@ app.get('/api/jobs', (req, res) => {
     enhancedCapture: {
       interactiveEnabled: job.options?.captureInteractive || false,
       maxInteractions: job.options?.maxInteractions || 0,
-      maxScreenshots: job.options?.maxScreenshotsPerPage || 0
+      maxScreenshots: job.options?.maxScreenshotsPerPage || 0,
+      maxInteractionsPerType: job.options?.maxInteractionsPerType || 3
     }
   }));
   
@@ -331,6 +324,7 @@ async function processJob(jobId) {
       maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
       interactionDelay: job.options.interactionDelay,
       changeDetectionTimeout: job.options.changeDetectionTimeout,
+      maxInteractionsPerType: job.options.maxInteractionsPerType,
       enableHoverCapture: job.options.enableHoverCapture,
       prioritizeNavigation: job.options.prioritizeNavigation,
       skipSocialElements: job.options.skipSocialElements,

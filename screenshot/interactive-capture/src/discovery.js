@@ -8,10 +8,11 @@ class ElementDiscovery {
   }
 
   async discoverInteractiveElements() {
+    console.log(`🚨 NEW DISCOVERY CODE IS RUNNING! maxInteractionsPerType = ${this.options.maxInteractionsPerType} 🚨`);
+    
     const elements = await this.page.evaluate((args) => {
       const { options, currentDomain } = args;
       const out = [], seen = new Set();
-      const counts = {}; // Keep track of interaction counts per type
 
       const getSelector = (el) => {
         // Strategy 1: Use ID if available
@@ -146,6 +147,9 @@ class ElementDiscovery {
       // Create a map to track elements by their text content to ensure uniqueness
       const elementsByText = new Map();
       const uniqueSignatures = new Set(); 
+      const allCandidates = [];
+
+      console.log(`🎯 PRE-DISCOVERY: Starting element discovery with maxInteractionsPerType = ${options.maxInteractionsPerType}`);
 
       cats.forEach(c => c.selectors.forEach(sel => {
         try {
@@ -156,14 +160,6 @@ class ElementDiscovery {
 
             const elementType = c.get(el);
             if (!elementType) return;
-            
-            if (!counts[elementType]) {
-              counts[elementType] = 0;
-            }
-            if (counts[elementType] >= options.maxInteractionsPerType) {
-              return;
-            }
-            counts[elementType]++;
 
             const signature = `${el.tagName}_${el.className}_${t}`;
             if (uniqueSignatures.has(signature)) {
@@ -197,7 +193,7 @@ class ElementDiscovery {
                 const retest = document.querySelectorAll(moreSpecificSelector);
                 if (retest.length === 1 && retest[0] === el) {
                   console.log(`✅ Fixed selector for "${t}": ${moreSpecificSelector}`);
-                  out.push({
+                  allCandidates.push({
                     selector: moreSpecificSelector,
                     type: c.name,
                     subtype: elementType,
@@ -211,7 +207,7 @@ class ElementDiscovery {
               console.log(`❌ Selector validation failed for "${t}": ${e.message}`);
             }
 
-            out.push({
+            allCandidates.push({
               selector: selector,
               type: c.name,
               subtype: elementType,
@@ -224,10 +220,43 @@ class ElementDiscovery {
         }
       }));
 
-      return out.sort((a, b) => {
+      console.log(`🎯 PRE-LIMIT: Found ${allCandidates.length} total candidates`);
+
+      // CRITICAL FIX: Apply selector-based limiting to the final output
+      const selectorCounts = {};
+      
+      // Sort by priority first
+      allCandidates.sort((a, b) => {
         if (b.priority !== a.priority) return b.priority - a.priority;
         return (a.text || '').localeCompare(b.text || '');
-      }).slice(0, options.maxInteractions);
+      });
+      
+      // Then apply selector limits
+      for (const element of allCandidates) {
+        if (!selectorCounts[element.selector]) {
+          selectorCounts[element.selector] = 0;
+        }
+        
+        if (selectorCounts[element.selector] < options.maxInteractionsPerType) {
+          selectorCounts[element.selector]++;
+          out.push(element);
+          console.log(`✅ KEEPING: "${element.selector}" with text "${element.text}" (count: ${selectorCounts[element.selector]}/${options.maxInteractionsPerType})`);
+        } else {
+          console.log(`🔄 LIMITING: Skipping "${element.selector}" with text "${element.text}" - reached limit (${options.maxInteractionsPerType})`);
+        }
+        
+        // Respect overall maxInteractions limit
+        if (out.length >= options.maxInteractions) {
+          console.log(`🛑 Reached maxInteractions limit: ${options.maxInteractions}`);
+          break;
+        }
+      }
+      
+      console.log(`🔢 FINAL SELECTOR COUNTS:`, selectorCounts);
+      console.log(`🎯 FINAL OUTPUT: ${out.length} elements after selector limiting`);
+      
+      return out;
+
     }, { options: this.options, currentDomain: this.env.currentDomain });
 
     const filtered = [];
@@ -239,6 +268,7 @@ class ElementDiscovery {
       filtered.push(el);
     }
     
+    console.log(`🎯 FINAL FILTERED: ${filtered.length} elements after external link filtering`);
     return filtered;
   }
 }
