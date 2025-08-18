@@ -10,6 +10,7 @@ function buildOptions(user = {}) {
     prioritizeNavigation: user.prioritizeNavigation !== false,
     skipSocialElements: user.skipSocialElements !== false,
     maxProcessingTime: user.maxProcessingTime ?? 120000,
+    maxInteractionsPerType: user.maxInteractionsPerType ?? 3, // New option
 
     // Tabs/sections
     tabPostClickWait: user.tabPostClickWait ?? 1600,

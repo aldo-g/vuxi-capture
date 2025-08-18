@@ -32,7 +32,7 @@ class EnhancedScreenshotCapture {
   async init() {
     if (!this.browser) {
       this.browser = await chromium.launch({
-        headless: false,
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

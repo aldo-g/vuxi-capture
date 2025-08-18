@@ -11,6 +11,7 @@ class ElementDiscovery {
     const elements = await this.page.evaluate((args) => {
       const { options, currentDomain } = args;
       const out = [], seen = new Set();
+      const counts = {}; // Keep track of interaction counts per type
 
       const getSelector = (el) => {
         // Strategy 1: Use ID if available
@@ -114,6 +115,9 @@ class ElementDiscovery {
           if (t.includes('submit') || t.includes('send')) return 'submit';
           if (t.includes('search')) return 'search';
           if (t.includes('next') || t.includes('continue')) return 'navigation';
+          if (t) {
+            return `button:${t.replace(/\s+/g, '_').substring(0, 20)}`;
+          }
           return 'button';
         }},
         { name: 'navigation', priority: 95, selectors: ['a[href]','nav a','[role="link"]'], get: el => {
@@ -126,7 +130,12 @@ class ElementDiscovery {
               }
             } catch (e) { return null; }
           }
-          return el.closest('nav') ? 'nav-link' : (el.href && el.href.includes('#') ? 'anchor-link' : 'link');
+          const t = text(el);
+          const baseType = el.closest('nav') ? 'nav-link' : (el.href && el.href.includes('#') ? 'anchor-link' : 'link');
+          if (t) {
+            return `${baseType}:${t.replace(/\s+/g, '_').substring(0, 20)}`;
+          }
+          return baseType;
         }},
         { name: 'expandable', priority: 80, selectors: ['details','[aria-expanded]','.accordion','.collapsible','.expandable'], get: el => el.tagName === 'DETAILS' ? 'details' : (el.hasAttribute('aria-expanded') ? 'aria-expandable' : 'expandable') },
         { name: 'forms', priority: 75, selectors: ['input:not([type="hidden"])','select','textarea'], get: el => el.type || el.tagName.toLowerCase() },
@@ -136,7 +145,7 @@ class ElementDiscovery {
 
       // Create a map to track elements by their text content to ensure uniqueness
       const elementsByText = new Map();
-      const uniqueSignatures = new Set(); // <-- **This is the key change**
+      const uniqueSignatures = new Set(); 
 
       cats.forEach(c => c.selectors.forEach(sel => {
         try {
@@ -148,7 +157,14 @@ class ElementDiscovery {
             const elementType = c.get(el);
             if (!elementType) return;
             
-            // Create a signature for the element to detect duplicates
+            if (!counts[elementType]) {
+              counts[elementType] = 0;
+            }
+            if (counts[elementType] >= options.maxInteractionsPerType) {
+              return;
+            }
+            counts[elementType]++;
+
             const signature = `${el.tagName}_${el.className}_${t}`;
             if (uniqueSignatures.has(signature)) {
                 console.log(`🔄 Skipping duplicate element with signature: "${signature}"`);
@@ -156,16 +172,12 @@ class ElementDiscovery {
             }
             uniqueSignatures.add(signature);
 
-
-            // Use a combination of element properties for uniqueness check
             const uniqueKey = `${el.tagName}_${el.className}_${t}_${el.getAttribute('aria-label') || ''}_${el.outerHTML.slice(0, 200)}`;
             if (seen.has(uniqueKey)) return;
             seen.add(uniqueKey);
 
-            // For buttons with text, ensure we don't have duplicates
             if (c.name === 'explicit' && t) {
               if (elementsByText.has(t)) {
-                // If we already have a button with this text, skip it
                 console.log(`🔄 Skipping duplicate button with text: "${t}"`);
                 return;
               }
@@ -174,12 +186,10 @@ class ElementDiscovery {
 
             const selector = getSelector(el);
             
-            // Validate the selector works and is unique
             try {
               const testElements = document.querySelectorAll(selector);
               if (testElements.length !== 1 || testElements[0] !== el) {
                 console.log(`⚠️ Selector not unique for element with text "${t}": ${selector}`);
-                // Try to make it more specific
                 const moreSpecificSelector = el.getAttribute('data-interactive-id') ? 
                   `[data-interactive-id="${el.getAttribute('data-interactive-id')}"]` : 
                   getSelector(el);
@@ -214,7 +224,6 @@ class ElementDiscovery {
         }
       }));
 
-      // Sort by priority and then by text content to ensure consistent ordering
       return out.sort((a, b) => {
         if (b.priority !== a.priority) return b.priority - a.priority;
         return (a.text || '').localeCompare(b.text || '');
