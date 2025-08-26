@@ -23,6 +23,7 @@ const JOB_STATUS = {
   PENDING: 'pending',
   RUNNING: 'running',
   URL_DISCOVERY: 'url_discovery',
+  URL_REVIEW_PENDING: 'url_review_pending',  // NEW STATUS
   SCREENSHOT_CAPTURE: 'screenshot_capture',
   COMPLETED: 'completed',
   FAILED: 'failed'
@@ -50,13 +51,16 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'Vuxi Enhanced Capture Service',
-    version: '2.0.0',
+    version: '2.1.0',
     timestamp: new Date().toISOString(),
     activeJobs,
     totalJobs: jobs.size,
     runningJobs: Array.from(jobs.values()).filter(j => 
       j.status === JOB_STATUS.URL_DISCOVERY || 
       j.status === JOB_STATUS.SCREENSHOT_CAPTURE
+    ).length,
+    reviewPendingJobs: Array.from(jobs.values()).filter(j => 
+      j.status === JOB_STATUS.URL_REVIEW_PENDING
     ).length
   });
 });
@@ -65,20 +69,23 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Vuxi Enhanced Capture Service',
-    version: '2.0.0',
-    description: 'Advanced web content capture with systematic interactive element discovery',
+    version: '2.1.0',
+    description: 'Advanced web content capture with URL review and systematic interactive element discovery',
     features: {
       interactiveCapture: 'Systematically discovers and interacts with tabs, accordions, expandable content',
       multipleScreenshots: 'Takes multiple targeted screenshots per page based on content changes',
       intelligentDiscovery: 'AI-powered element discovery using multiple detection strategies',
       changeDetection: 'Only captures screenshots when content actually changes',
-      prioritization: 'Smart prioritization of interactive elements for optimal capture'
+      prioritization: 'Smart prioritization of interactive elements for optimal capture',
+      urlReview: 'Manual review and editing of discovered URLs before screenshotting' // NEW FEATURE
     },
     endpoints: {
       health: '/health',
       createJob: 'POST /api/capture',
       getJob: 'GET /api/capture/:jobId',
-      listJobs: 'GET /api/jobs'
+      listJobs: 'GET /api/jobs',
+      updateUrls: 'PUT /api/capture/:jobId/urls',  // NEW ENDPOINT
+      proceedWithScreenshots: 'POST /api/capture/:jobId/proceed'  // NEW ENDPOINT
     },
     enhancedOptions: {
       captureInteractive: 'Enable/disable interactive element capture (default: true)',
@@ -86,7 +93,8 @@ app.get('/', (req, res) => {
       maxScreenshotsPerPage: 'Maximum screenshots per page (default: 15)',
       interactionDelay: 'Delay between interactions in ms (default: 800)',
       changeDetectionTimeout: 'Time to wait for content changes after interaction (default: 2000ms)',
-      maxInteractionsPerType: 'Maximum interactions per selector type (default: 3)'
+      maxInteractionsPerType: 'Maximum interactions per selector type (default: 3)',
+      manualReview: 'Enable manual URL review before screenshotting (default: false)'  // NEW OPTION
     }
   });
 });
@@ -94,7 +102,6 @@ app.get('/', (req, res) => {
 // Create a new capture job
 app.post('/api/capture', async (req, res) => {
   try {
-    
     const { baseUrl, options = {} } = req.body;
     
     if (!baseUrl) {
@@ -117,7 +124,7 @@ app.post('/api/capture', async (req, res) => {
         outputDir,
         
         // ENHANCED INTERACTIVE CAPTURE OPTIONS
-        captureInteractive: options.captureInteractive !== false, // Default true
+        captureInteractive: options.captureInteractive !== false,
         maxInteractions: options.maxInteractions || 30,
         maxScreenshotsPerPage: options.maxScreenshotsPerPage || 15,
         interactionDelay: options.interactionDelay || 800,
@@ -126,9 +133,12 @@ app.post('/api/capture', async (req, res) => {
         
         // ADVANCED OPTIONS (optional)
         enableHoverCapture: options.enableHoverCapture || false,
-        prioritizeNavigation: options.prioritizeNavigation !== false, // Default true
-        skipSocialElements: options.skipSocialElements !== false, // Default true
-        maxProcessingTime: options.maxProcessingTime || 120000 // 2 minutes max per page
+        prioritizeNavigation: options.prioritizeNavigation !== false,
+        skipSocialElements: options.skipSocialElements !== false,
+        maxProcessingTime: options.maxProcessingTime || 120000,
+        
+        // NEW MANUAL REVIEW OPTION
+        manualReview: options.manualReview || false
       },
       status: JOB_STATUS.PENDING,
       createdAt: new Date().toISOString(),
@@ -141,7 +151,7 @@ app.post('/api/capture', async (req, res) => {
     };
     
     jobs.set(jobId, job);
-    console.log(`✅ Job ${jobId.slice(0,8)} created for ${baseUrl}`);
+    console.log(`✅ Job ${jobId.slice(0,8)} created for ${baseUrl} ${job.options.manualReview ? '(with manual review)' : ''}`);
     
     // Start processing asynchronously with better error handling
     setImmediate(() => {
@@ -166,6 +176,9 @@ app.post('/api/capture', async (req, res) => {
   }
 });
 
+// REMOVED: Complex API endpoints for URL review
+// The manual review now happens interactively in the terminal
+
 // Get job status
 app.get('/api/capture/:jobId', (req, res) => {
   const { jobId } = req.params;
@@ -183,19 +196,28 @@ app.get('/api/capture/:jobId', (req, res) => {
     updatedAt: job.updatedAt,
     baseUrl: job.baseUrl,
     options: {
-      // Core options
       captureInteractive: job.options.captureInteractive,
       maxInteractions: job.options.maxInteractions,
       maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
       maxPages: job.options.maxPages,
       concurrency: job.options.concurrency,
       maxInteractionsPerType: job.options.maxInteractionsPerType,
-      
-      // Advanced options
       enableHoverCapture: job.options.enableHoverCapture,
       interactionDelay: job.options.interactionDelay,
-      changeDetectionTimeout: job.options.changeDetectionTimeout
+      changeDetectionTimeout: job.options.changeDetectionTimeout,
+      manualReview: job.options.manualReview
     },
+    // Include URL discovery results if available
+    ...(job.urlDiscovery && {
+      urlDiscovery: {
+        urlCount: job.urlDiscovery.urls?.length || 0,
+        urls: job.urlDiscovery.urls || [],
+        stats: job.urlDiscovery.stats,
+        originalUrlCount: job.urlDiscovery.originalUrlCount,
+        reviewedUrlCount: job.urlDiscovery.reviewedUrlCount,
+        urlsModified: job.urlDiscovery.urlsModified || false
+      }
+    }),
     ...(job.status === JOB_STATUS.COMPLETED && {
       results: job.results
     }),
@@ -213,6 +235,8 @@ app.get('/api/jobs', (req, res) => {
     baseUrl: job.baseUrl,
     createdAt: job.createdAt,
     progress: job.progress,
+    urlCount: job.urlDiscovery?.urls?.length || 0,
+    manualReview: job.options?.manualReview || false,
     enhancedCapture: {
       interactiveEnabled: job.options?.captureInteractive || false,
       maxInteractions: job.options?.maxInteractions || 0,
@@ -227,7 +251,7 @@ app.get('/api/jobs', (req, res) => {
 // Serve static files (screenshots, reports)
 app.use('/data', express.static(path.join(__dirname, 'data')));
 
-// Process a job with timeout and better error handling
+// MODIFIED: Process a job with URL review support
 async function processJob(jobId) {
   const job = jobs.get(jobId);
   if (!job) throw new Error('Job not found');
@@ -246,7 +270,7 @@ async function processJob(jobId) {
     await fs.ensureDir(job.options.outputDir);
     console.log(`📁 Created output directory: ${job.options.outputDir}`);
     
-    // Phase 1: URL Discovery with timeout
+    // Phase 1: URL Discovery
     console.log(`🔍 Starting URL discovery for: ${job.baseUrl}`);
     updateJobStatus(jobId, JOB_STATUS.URL_DISCOVERY, {
       progress: {
@@ -261,14 +285,6 @@ async function processJob(jobId) {
       outputDir: job.options.outputDir
     });
     
-    console.log(`🔍 URL Discovery options:`, {
-      maxPages: job.options.maxPages,
-      timeout: job.options.timeout,
-      concurrency: job.options.concurrency,
-      fastMode: job.options.fastMode
-    });
-    
-    // Add timeout wrapper for URL discovery
     const urlResult = await Promise.race([
       urlService.discover(job.baseUrl),
       new Promise((_, reject) => 
@@ -290,6 +306,7 @@ async function processJob(jobId) {
       throw new Error('No URLs discovered from the website');
     }
     
+    // Store URL discovery results
     updateJobStatus(jobId, JOB_STATUS.URL_DISCOVERY, {
       progress: {
         stage: 'url_discovery_complete',
@@ -297,112 +314,205 @@ async function processJob(jobId) {
         message: `Found ${urlResult.urls.length} URLs`
       },
       urlDiscovery: {
-        urlCount: urlResult.urls.length,
-        stats: urlResult.stats
+        urls: urlResult.urls,
+        stats: urlResult.stats,
+        originalUrlCount: urlResult.urls.length
       }
     });
     
-    updateJobStatus(jobId, JOB_STATUS.SCREENSHOT_CAPTURE, {
-      progress: {
-        stage: 'screenshot_capture',
-        percentage: 45,
-        message: job.options.captureInteractive ? 
-          'Capturing screenshots with systematic interactive element discovery...' : 
-          'Capturing standard screenshots...'
-      }
-    });
-    
-    const screenshotService = new EnhancedScreenshotService({
-      outputDir: job.options.outputDir,
-      concurrent: job.options.concurrency || 4,
-      timeout: job.options.timeout || 30000,
-      viewport: { width: 1440, height: 900 },
+    // Check if manual review is enabled
+    if (job.options.manualReview) {
+      console.log(`⏸️ Job ${jobId.slice(0,8)}: Manual review enabled, waiting for URL approval`);
       
-      // Enhanced interactive options
-      enableInteractiveCapture: job.options.captureInteractive,
-      maxInteractions: job.options.maxInteractions,
-      maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
-      interactionDelay: job.options.interactionDelay,
-      changeDetectionTimeout: job.options.changeDetectionTimeout,
-      maxInteractionsPerType: job.options.maxInteractionsPerType,
-      enableHoverCapture: job.options.enableHoverCapture,
-      prioritizeNavigation: job.options.prioritizeNavigation,
-      skipSocialElements: job.options.skipSocialElements,
-      maxProcessingTime: job.options.maxProcessingTime
-    });
-    
-    const screenshotResult = await screenshotService.captureAll(urlResult.urls);
-    
-    console.log(`📸 Enhanced screenshot capture completed:`, {
-      success: screenshotResult.success,
-      successful: screenshotResult.successful?.length || 0,
-      failed: screenshotResult.failed?.length || 0,
-      totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
-      interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0
-    });
-    
-    if (!screenshotResult.success && screenshotResult.successful.length === 0) {
-      throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
+      // The URLs are already saved to urls_simple.json by the URLDiscoveryService
+      const urlsFilePath = path.join(job.options.outputDir, 'urls_simple.json');
+      
+      console.log(`📝 URLs saved to: ${urlsFilePath}`);
+      console.log(`📋 Discovered URLs:`);
+      urlResult.urls.forEach((url, i) => {
+        console.log(`   ${i + 1}. ${url}`);
+      });
+      
+      // Interactive prompt
+      console.log(`\n🔍 Review and edit the URLs in: ${urlsFilePath}`);
+      console.log(`⏸️  Press Enter to proceed with screenshotting...`);
+      
+      // Wait for user input
+      await waitForEnter();
+      
+      // Read the edited URLs from urls_simple.json
+      let editedUrls;
+      try {
+        editedUrls = await fs.readJson(urlsFilePath);
+        if (!Array.isArray(editedUrls)) {
+          throw new Error('urls_simple.json must contain an array');
+        }
+        console.log(`✅ Loaded ${editedUrls.length} URLs from edited file`);
+        
+        if (editedUrls.length !== urlResult.urls.length) {
+          console.log(`📝 URLs modified: ${urlResult.urls.length} → ${editedUrls.length}`);
+        }
+      } catch (error) {
+        console.log(`⚠️  Error reading edited URLs: ${error.message}`);
+        console.log(`📋 Using original discovered URLs instead`);
+        editedUrls = urlResult.urls;
+      }
+      
+      // Update job with edited URLs
+      updateJobStatus(jobId, JOB_STATUS.URL_DISCOVERY, {
+        progress: {
+          stage: 'url_discovery_complete',
+          percentage: 40,
+          message: `Using ${editedUrls.length} URLs for screenshotting`
+        },
+        urlDiscovery: {
+          urls: editedUrls,
+          stats: urlResult.stats,
+          originalUrlCount: urlResult.urls.length,
+          finalUrlCount: editedUrls.length,
+          urlsModified: editedUrls.length !== urlResult.urls.length
+        }
+      });
+      
+      // Continue with the edited URLs
+      urlResult.urls = editedUrls;
     }
     
-    // Job completed successfully with enhanced results
-    const results = {
-      urls: urlResult.urls,
-      screenshots: screenshotResult.successful,
-      stats: {
-        urlDiscovery: urlResult.stats,
-        screenshots: screenshotResult.stats
-      },
-      files: {
-        urls: urlResult.files,
-        screenshots: screenshotResult.files
-      },
-      outputDir: job.options.outputDir,
-      
-      // Enhanced statistics
-      enhancedCapture: {
-        interactiveEnabled: job.options.captureInteractive,
-        totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
-        averageScreenshotsPerPage: screenshotResult.stats?.averageScreenshotsPerPage || '1.0',
-        interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0,
-        interactionSuccessRate: screenshotResult.stats?.interactivePagesFound > 0 ? 
-          (screenshotResult.stats.interactivePagesFound / screenshotResult.successful.length * 100).toFixed(1) + '%' : '0%'
-      }
-    };
-    
-    const completionMessage = job.options.captureInteractive ? 
-      `🎉 ENHANCED ANALYSIS COMPLETE! 
-      📸 Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots from ${urlResult.urls.length} URLs
-      🎯 Found interactive content on ${screenshotResult.stats?.interactivePagesFound || 0} pages
-      ⚡ Average ${screenshotResult.stats?.averageScreenshotsPerPage || '1.0'} screenshots per page
-      🔍 Successfully discovered and interacted with tabs, expandable content, and hidden elements` :
-      `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlResult.urls.length} URLs`;
-    
-    console.log(`✅ Job ${jobId.slice(0,8)} completed successfully`);
-    console.log(`🎯 Interactive pages found: ${screenshotResult.stats?.interactivePagesFound || 0}/${screenshotResult.successful.length}`);
-    
-    updateJobStatus(jobId, JOB_STATUS.COMPLETED, {
-      results,
-      progress: {
-        stage: 'completed',
-        percentage: 100,
-        message: completionMessage
-      }
-    });
+    // If no manual review, proceed directly to screenshots
+    await proceedWithScreenshots(jobId, urlResult);
     
   } catch (error) {
     console.error(`❌ Job ${jobId.slice(0,8)} failed:`, error);
-    console.error('Error stack:', error.stack);
-    updateJobStatus(jobId, JOB_STATUS.FAILED, {
-      error: error.message,
-      progress: {
-        stage: 'failed',
-        percentage: 0,
-        message: `Job failed: ${error.message}`
-      }
-    });
     throw error;
   }
+}
+
+// Helper function to wait for Enter key press
+function waitForEnter() {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    
+    const onData = (key) => {
+      if (key === '\r' || key === '\n' || key === '\u0003') {
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        console.log(''); // New line after Enter
+        resolve();
+      }
+    };
+    
+    stdin.on('data', onData);
+  });
+}
+
+// MODIFIED: Handle screenshot capture phase (simplified)
+async function proceedWithScreenshots(jobId, urlResult) {
+  const job = jobs.get(jobId);
+  if (!job) throw new Error('Job not found');
+  
+  // Get URLs from urlResult (which may have been edited during review)
+  const urlsToCapture = urlResult.urls;
+  
+  console.log(`📸 Starting screenshot capture for ${urlsToCapture.length} URLs`);
+  
+  updateJobStatus(jobId, JOB_STATUS.SCREENSHOT_CAPTURE, {
+    progress: {
+      stage: 'screenshot_capture',
+      percentage: 50,
+      message: job.options.captureInteractive ?
+        'Capturing screenshots with systematic interactive element discovery...' : 
+        'Capturing standard screenshots...'
+    }
+  });
+  
+  const screenshotService = new EnhancedScreenshotService({
+    outputDir: job.options.outputDir,
+    concurrent: job.options.concurrency || 4,
+    timeout: job.options.timeout || 30000,
+    viewport: { width: 1440, height: 900 },
+    
+    // Enhanced interactive options
+    enableInteractiveCapture: job.options.captureInteractive,
+    maxInteractions: job.options.maxInteractions,
+    maxScreenshotsPerPage: job.options.maxScreenshotsPerPage,
+    interactionDelay: job.options.interactionDelay,
+    changeDetectionTimeout: job.options.changeDetectionTimeout,
+    maxInteractionsPerType: job.options.maxInteractionsPerType,
+    enableHoverCapture: job.options.enableHoverCapture,
+    prioritizeNavigation: job.options.prioritizeNavigation,
+    skipSocialElements: job.options.skipSocialElements,
+    maxProcessingTime: job.options.maxProcessingTime
+  });
+  
+  const screenshotResult = await screenshotService.captureAll(urlsToCapture);
+  
+  console.log(`📸 Enhanced screenshot capture completed:`, {
+    success: screenshotResult.success,
+    successful: screenshotResult.successful?.length || 0,
+    failed: screenshotResult.failed?.length || 0,
+    totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
+    interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0
+  });
+  
+  if (!screenshotResult.success && screenshotResult.successful.length === 0) {
+    throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
+  }
+  
+  // Job completed successfully
+  const results = {
+    urls: urlsToCapture,
+    screenshots: screenshotResult.successful,
+    stats: {
+      urlDiscovery: job.urlDiscovery.stats,
+      screenshots: screenshotResult.stats
+    },
+    files: {
+      urls: urlResult?.files || [],
+      screenshots: screenshotResult.files
+    },
+    outputDir: job.options.outputDir,
+    
+    enhancedCapture: {
+      interactiveEnabled: job.options.captureInteractive,
+      totalScreenshots: screenshotResult.stats?.totalScreenshots || 0,
+      averageScreenshotsPerPage: screenshotResult.stats?.averageScreenshotsPerPage || '1.0',
+      interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0,
+      interactionSuccessRate: screenshotResult.stats?.interactivePagesFound > 0 ? 
+        (screenshotResult.stats.interactivePagesFound / screenshotResult.successful.length * 100).toFixed(1) + '%' : '0%'
+    },
+    
+    // URL review information
+    urlReview: {
+      manualReviewEnabled: job.options.manualReview,
+      originalUrlCount: job.urlDiscovery.originalUrlCount,
+      finalUrlCount: urlsToCapture.length,
+      urlsModified: job.urlDiscovery.urlsModified || false
+    }
+  };
+  
+  const completionMessage = job.options.captureInteractive ? 
+    `🎉 ENHANCED ANALYSIS COMPLETE! 
+    📸 Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots from ${urlsToCapture.length} URLs
+    🎯 Found interactive content on ${screenshotResult.stats?.interactivePagesFound || 0} pages
+    ⚡ Average ${screenshotResult.stats?.averageScreenshotsPerPage || '1.0'} screenshots per page
+    🔍 Successfully discovered and interacted with tabs, expandable content, and hidden elements` :
+    `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlsToCapture.length} URLs`;
+  
+  console.log(`✅ Job ${jobId.slice(0,8)} completed successfully`);
+  console.log(`🎯 Interactive pages found: ${screenshotResult.stats?.interactivePagesFound || 0}/${screenshotResult.successful.length}`);
+  
+  updateJobStatus(jobId, JOB_STATUS.COMPLETED, {
+    results,
+    progress: {
+      stage: 'completed',
+      percentage: 100,
+      message: completionMessage
+    }
+  });
 }
 
 // Error handling middleware
@@ -413,7 +523,8 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Enhanced Capture Service running on port ${PORT}`);
+  console.log(`🚀 Enhanced Capture Service v2.1.0 running on port ${PORT}`);
+  console.log(`📝 New features: Manual URL review before screenshotting`);
 });
 
 module.exports = app;
