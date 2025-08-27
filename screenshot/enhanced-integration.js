@@ -34,7 +34,7 @@ class EnhancedScreenshotCapture {
   async init() {
     if (!this.browser) {
       this.browser = await chromium.launch({
-        headless: false,
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -101,7 +101,8 @@ class EnhancedScreenshotCapture {
           maxInteractionsPerType: this.interactiveOptions.maxInteractionsPerType // Added this line!
         });
         
-        const screenshots = await interactiveCapture.captureInteractiveContent();
+        const interactiveResult = await interactiveCapture.captureInteractiveContent();
+        const screenshots = interactiveResult.screenshots;
         
         for (let i = 0; i < screenshots.length; i++) {
           const screenshot = screenshots[i];

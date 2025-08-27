@@ -173,6 +173,42 @@ Navigating back.`);
 
   async interactWithElement(elementData, index) {
     try {
+      if (elementData.type === 'hover-and-click' || elementData.type === 'interactive-container') {
+        console.log(`✨ Performing hover and click interaction...`);
+        try {
+            // Hover to trigger the effect
+            await this.page.hover(elementData.selector);
+            await this.page.waitForTimeout(500); // Wait for transition
+
+            // Take screenshot of the hover state
+            const safeLabelHover = (elementData.text || 'hover_effect').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+            await this.screenshotter.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${safeLabelHover}`, { force: true, tags: ['hover-effect'] });
+
+            // Now click the element
+            await this.page.click(elementData.selector);
+            await this.page.waitForTimeout(this.options.interactionDelay);
+
+            // Take screenshot of the clicked state
+            const safeLabelClick = (elementData.text || 'click_effect').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+            await this.screenshotter.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${safeLabelClick}`, { force: true, tags: ['click-effect'] });
+            
+            this.interactionHistory.set(`interaction_${index + 1}`, {
+                selector: elementData.selector,
+                type: elementData.type,
+                text: elementData.text,
+                action: 'hover and click'
+            });
+
+            await this.restoreToBaselineState();
+            return { success: true, navigated: false };
+
+        } catch (e) {
+            console.log(`   ❌ Hover and click interaction failed: ${e.message}`);
+            await this.restoreToBaselineState();
+            return null;
+        }
+      }
+      
       console.log(`🎯 Interacting with element ${index + 1}: ${elementData.type} - "${(elementData.text || '').substring(0, 50)}"`);
 
       // First, try to find the element and log what we're trying to use

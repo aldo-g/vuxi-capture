@@ -118,7 +118,7 @@ class ElementDiscovery {
             
             // Prioritize meaningful classes for interactive elements
             const meaningfulClasses = classes.filter(cls =>
-              ['member', 'panel_link', 'card', 'nav-link', 'button', 'btn', 'link', 'interactive', 'clickable', 'hover'].some(meaningful => cls.includes(meaningful))
+              ['member', 'panel_link', 'card', 'nav-link', 'button', 'btn', 'link', 'interactive', 'clickable', 'hover', 'overlay'].some(meaningful => cls.includes(meaningful))
             );
             
             if (meaningfulClasses.length > 0) {
@@ -390,16 +390,27 @@ class ElementDiscovery {
           get: () => 'modal-trigger' 
         },
         {
-          name: 'hover-interactive',
-          priority: 68,
-          selectors: ['.member', '.card', '.team-member', '.hover-card', '[data-hover]', '.interactive-card'],
-          get: el => {
-            const t = text(el);
-            if (t) {
-              return `hover-card:${t.replace(/\s+/g, '_').substring(0, 20)}`;
-            }
-            return 'hover-card';
-          }
+          name: 'hover-and-click',
+          priority: 72,
+          selectors: [
+            '.overlay',
+            '.member', 
+            '.card', 
+            '.team-member', 
+            '.hover-card', 
+            '[data-hover-interactive]'
+          ],
+          get: el => 'hover-and-click'
+        },
+        {
+          name: 'interactive-container',
+          priority: 65,
+          selectors: [
+            'div[onclick]',
+            'div[role="button"]',
+            'div.interactive'
+          ],
+          get: () => 'interactive-container'
         },
         { 
           name: 'interactive-generic', 
