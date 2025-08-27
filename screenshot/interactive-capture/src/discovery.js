@@ -15,32 +15,34 @@ class ElementDiscovery {
       const out = [], seen = new Set();
 
       const getSelector = (el) => {
-        // Strategy 1: Use ID if available
+        // Strategy 1: Use more stable data attributes first
+        const stableAttrs = ['data-testid', 'data-cy', 'data-qa'];
+        for (const attr of stableAttrs) {
+          if (el.hasAttribute(attr)) {
+            return `[${attr}="${el.getAttribute(attr)}"]`;
+          }
+        }
+        
+        // Strategy 2: Use ID if available
         if (el.id) return `#${CSS.escape(el.id)}`;
         
-        // Strategy 2: Use text content for buttons to make them unique
+        // Strategy 3: Use text content for buttons to make them unique
         if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') {
           const textContent = (el.textContent || '').trim();
           if (textContent) {
-            // Try to create a selector that includes the text content
             const escapedText = textContent.replace(/[^\w\s]/g, '').toLowerCase();
             if (escapedText) {
-              // Use a combination of tag and text content
-              const textSelector = `button:contains("${textContent}")`;
-              // Since :contains() isn't standard CSS, we'll use a more robust approach
               const buttonWithText = `button[data-button-text="${escapedText}"]`;
-              // Set a temporary attribute for better selection
               el.setAttribute('data-button-text', escapedText);
               return buttonWithText;
             }
           }
         }
 
-        // Strategy 3: Use classes but be more specific
+        // Strategy 4: Use classes but be more specific
         if (el.className && typeof el.className === 'string') {
           const classes = el.className.trim().split(/\s+/).filter(c => c && /^[a-zA-Z_-]/.test(c));
           if (classes.length) {
-            // For buttons with similar classes, try to find distinguishing classes
             const distinctiveClasses = classes.filter(cls => 
               !['relative', 'z-10', 'px-6', 'py-3', 'text-base', 'rounded-full', 'transition-all', 'duration-300', 'active:scale-95', 'select-none', 'whitespace-nowrap'].includes(cls)
             );
@@ -48,13 +50,12 @@ class ElementDiscovery {
             if (distinctiveClasses.length > 0) {
               return `${el.tagName.toLowerCase()}.${distinctiveClasses.slice(0, 3).map(CSS.escape).join('.')}`;
             } else {
-              // Fall back to using more classes for specificity
               return `${el.tagName.toLowerCase()}.${classes.slice(0, 4).map(CSS.escape).join('.')}`;
             }
           }
         }
 
-        // Strategy 4: Use position-based selector for similar elements
+        // Strategy 5: Use position-based selector for similar elements
         const parent = el.parentElement;
         if (parent) {
           const siblings = Array.from(parent.children).filter(child => 
@@ -65,7 +66,6 @@ class ElementDiscovery {
           if (siblings.length > 1) {
             const index = siblings.indexOf(el);
             if (index >= 0) {
-              // Create a more specific selector using nth-child
               const parentSelector = parent.id ? `#${CSS.escape(parent.id)}` : 
                                    parent.className ? `.${parent.className.split(/\s+/)[0]}` : 
                                    parent.tagName.toLowerCase();
@@ -73,19 +73,7 @@ class ElementDiscovery {
             }
           }
         }
-
-        // Strategy 5: Use aria attributes or data attributes
-        const ariaLabel = el.getAttribute('aria-label');
-        if (ariaLabel) {
-          return `[aria-label="${ariaLabel}"]`;
-        }
-
-        const dataAttrs = Array.from(el.attributes).filter(attr => attr.name.startsWith('data-'));
-        if (dataAttrs.length > 0) {
-          const dataAttr = dataAttrs[0];
-          return `[${dataAttr.name}="${dataAttr.value}"]`;
-        }
-
+        
         // Strategy 6: Create unique identifier as last resort
         const uid = 'interactive-' + Math.random().toString(36).slice(2, 10);
         el.setAttribute('data-interactive-id', uid);
@@ -96,7 +84,7 @@ class ElementDiscovery {
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) return false;
         const s = getComputedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || s.pointerEvents === 'none') return false;
+        if (s.display === 'none' || s.visibility === 'hidden' || s.pointerEvents === 'none' || s.opacity === '0') return false;
         return true;
       };
 
@@ -144,7 +132,6 @@ class ElementDiscovery {
         { name: 'interactive-generic', priority: 60, selectors: ['[onclick]','[onmouseover]','[data-action]'], get: el => el.hasAttribute('onclick') ? 'onclick' : (el.hasAttribute('onmouseover') ? 'hover' : 'data-action') }
       ];
 
-      // Create a map to track elements by their text content to ensure uniqueness
       const elementsByText = new Map();
       const uniqueSignatures = new Set(); 
       const allCandidates = [];
@@ -222,16 +209,13 @@ class ElementDiscovery {
 
       console.log(`🎯 PRE-LIMIT: Found ${allCandidates.length} total candidates`);
 
-      // CRITICAL FIX: Apply selector-based limiting to the final output
       const selectorCounts = {};
       
-      // Sort by priority first
       allCandidates.sort((a, b) => {
         if (b.priority !== a.priority) return b.priority - a.priority;
         return (a.text || '').localeCompare(b.text || '');
       });
       
-      // Then apply selector limits
       for (const element of allCandidates) {
         if (!selectorCounts[element.selector]) {
           selectorCounts[element.selector] = 0;
@@ -245,7 +229,6 @@ class ElementDiscovery {
           console.log(`🔄 LIMITING: Skipping "${element.selector}" with text "${element.text}" - reached limit (${options.maxInteractionsPerType})`);
         }
         
-        // Respect overall maxInteractions limit
         if (out.length >= options.maxInteractions) {
           console.log(`🛑 Reached maxInteractions limit: ${options.maxInteractions}`);
           break;
