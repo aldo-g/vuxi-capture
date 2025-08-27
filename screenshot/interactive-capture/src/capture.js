@@ -25,6 +25,7 @@ class InteractiveContentCapture {
     this.totalInteractions = 0;
     this.maxInteractionsReached = false;
     this.failedElements = new Set();
+    this.retryAttempts = new Map(); // Track retry attempts per element
 
     this.env = new EnvironmentGuard(this.page);
     this.validator = new PageValidator(this.page, this.options);
@@ -45,7 +46,8 @@ class InteractiveContentCapture {
   }
 
   _createElementSignature(element) {
-    return `${element.type}_${element.text}_${element.selector.replace(/\[data-interactive-id="[^"]+"\]/, '[data-interactive-id="*"]')}`;
+    // Create a more comprehensive signature for better tracking
+    return `${element.type}_${element.subtype || ''}_${(element.text || '').substring(0, 50)}_${element.selector.replace(/\[data-interactive-id="[^"]+"\]/, '[data-interactive-id="*"]').replace(/data-button-text="[^"]+"/, 'data-button-text="*"')}`;
   }
 
   _shouldContinueProcessing() {
@@ -57,12 +59,17 @@ class InteractiveContentCapture {
   }
 
   async _discoverNewElements() {
+    console.log('🔍 Discovering interactive elements...');
     const discovery = new ElementDiscovery(this.page, this.options, this.env);
     const allElements = await discovery.discoverInteractiveElements();
     
     const newElements = allElements.filter(element => {
       const signature = this._createElementSignature(element);
-      return !this.processedElementSignatures.has(signature);
+      const isNew = !this.processedElementSignatures.has(signature);
+      if (!isNew) {
+        console.log(`🔄 Skipping already processed element: ${signature.substring(0, 60)}`);
+      }
+      return isNew;
     });
 
     console.log(`🔍 Discovered ${allElements.length} total elements, ${newElements.length} new elements to process`);
@@ -73,35 +80,248 @@ class InteractiveContentCapture {
   async _refreshAndRediscoverBaseline() {
     console.log(`   🔄 Refreshing page to rediscover baseline elements...`);
     
-    await this.page.goto(this.interactor.baselineState.url, { 
-      waitUntil: 'networkidle',
-      timeout: 30000 
-    });
+    try {
+      // Navigate back to the baseline URL
+      await this.page.goto(this.interactor.baselineState.url, { 
+        waitUntil: 'networkidle',
+        timeout: 30000 
+      });
+      
+      // Wait for page to be fully loaded
+      await this.waits.waitForCompletePageLoadWithValidation();
+      await this.page.waitForTimeout(1000);
+      
+      // CRITICAL: Handle cookie consent again after refresh
+      console.log('   🍪 Re-handling cookie consent after page refresh...');
+      await this._handleCookieConsentAndOverlays();
+      
+      // Wait a bit more for page to stabilize
+      await this.page.waitForTimeout(1000);
+      
+      // Recapture baseline state with element identifiers
+      await this.interactor.captureBaselineState();
+      
+      console.log(`   ✅ Page refreshed and baseline state recaptured`);
+      return true;
+    } catch (error) {
+      console.log(`   ❌ Failed to refresh and rediscover baseline: ${error.message}`);
+      return false;
+    }
+  }
+
+  async _handleFailedElement(element, elementIndex) {
+    const signature = this._createElementSignature(element);
+    const currentRetries = this.retryAttempts.get(signature) || 0;
+    const maxRetries = 2; // Allow up to 2 retries per element
     
-    await this.waits.waitForCompletePageLoadWithValidation();
-    await this.page.waitForTimeout(1000);
+    if (currentRetries < maxRetries) {
+      console.log(`   🔄 Element failed, attempting retry ${currentRetries + 1}/${maxRetries}...`);
+      this.retryAttempts.set(signature, currentRetries + 1);
+      
+      // Try refreshing the page and reapplying identifiers
+      const refreshSuccess = await this._refreshAndRediscoverBaseline();
+      
+      if (refreshSuccess) {
+        // Give the page some time to settle after refresh
+        await this.page.waitForTimeout(1000);
+        
+        // Try the interaction again
+        const retryResult = await this.interactor.interactWithElement(element, this.totalInteractions);
+        
+        if (retryResult && retryResult.success) {
+          console.log(`   ✅ Retry successful after page refresh`);
+          this.totalInteractions++;
+          return true;
+        } else {
+          console.log(`   ❌ Retry failed after page refresh`);
+          if (currentRetries + 1 >= maxRetries) {
+            this.failedElements.add(signature);
+            console.log(`   🚫 Element permanently failed after ${maxRetries} retries`);
+          }
+          return false;
+        }
+      } else {
+        console.log(`   ❌ Failed to refresh page for retry`);
+        return false;
+      }
+    } else {
+      console.log(`   ❌ Element already failed ${maxRetries} times, skipping`);
+      return false;
+    }
+  }
+
+  async _handleCookieConsentAndOverlays() {
+    try {
+      console.log('🔍 Looking for cookie consent dialogs and overlays...');
+      
+      const handled = await this.page.evaluate(() => {
+        // First, try to find and click accept buttons
+        const acceptSelectors = [
+          'button:contains("Accept")',
+          'button:contains("Accept All")',
+          'button:contains("I Accept")',
+          'button:contains("Agree")',
+          '.cky-btn-accept',
+          '.cookie-accept',
+          '#cookie-accept',
+          '[data-action="accept"]',
+          '[data-action="accept-all"]'
+        ];
+        
+        // Use a more comprehensive text-based search
+        const buttons = Array.from(document.querySelectorAll('button, a, .btn'));
+        let acceptButton = null;
+        
+        for (const button of buttons) {
+          const text = (button.textContent || '').toLowerCase().trim();
+          const classes = (button.className || '').toLowerCase();
+          
+          if (
+            (text.includes('accept') || text.includes('agree') || text.includes('ok')) &&
+            !text.includes('reject') &&
+            !text.includes('decline') &&
+            !text.includes('deny')
+          ) {
+            const rect = button.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              acceptButton = button;
+              console.log('✅ Found cookie accept button:', text);
+              break;
+            }
+          }
+        }
+        
+        if (acceptButton) {
+          try {
+            acceptButton.click();
+            console.log('🍪 Clicked cookie accept button');
+            return true;
+          } catch (e) {
+            console.log('❌ Failed to click accept button:', e.message);
+          }
+        }
+        
+        // If no accept button found, try to remove cookie overlays
+        const overlaySelectors = [
+          '[id*="cookie" i]',
+          '[class*="cookie" i]', 
+          '[id*="consent" i]',
+          '[class*="consent" i]',
+          '[class*="cky" i]', // CookieYes specific
+          '.modal-backdrop',
+          '.overlay',
+          '[style*="position: fixed"]',
+          '[style*="z-index"]'
+        ];
+        
+        let removedOverlay = false;
+        for (const selector of overlaySelectors) {
+          try {
+            const elements = document.querySelectorAll(selector);
+            for (const element of elements) {
+              const text = (element.textContent || '').toLowerCase();
+              const styles = window.getComputedStyle(element);
+              
+              if (
+                (text.includes('cookie') || text.includes('privacy') || text.includes('consent')) &&
+                (styles.position === 'fixed' || styles.position === 'absolute') &&
+                parseInt(styles.zIndex) > 100
+              ) {
+                console.log('🗑️ Removing cookie overlay:', element.className);
+                element.remove();
+                removedOverlay = true;
+              }
+            }
+          } catch (e) {
+            // Continue with next selector
+          }
+        }
+        
+        return removedOverlay;
+      });
+      
+      if (handled) {
+        console.log('✅ Cookie consent handled, waiting for page to stabilize...');
+        await this.page.waitForTimeout(2000); // Give page time to settle
+        
+        // Wait for any animations or redirects to complete
+        await this.waits.waitForCompletePageLoadWithValidation();
+      } else {
+        console.log('ℹ️ No cookie consent dialogs found or already handled');
+      }
+      
+    } catch (error) {
+      console.log('⚠️ Cookie consent handling failed:', error.message);
+      // Continue anyway - don't let cookie handling block the capture
+    }
+  }
+
+  async _processElement(element, elementIndex, totalElements) {
+    const signature = this._createElementSignature(element);
     
-    await this.interactor.reapplyElementIdentifiers();
+    // Skip if we've already permanently failed this element
+    if (this.failedElements.has(signature)) {
+      console.log(`   ❌ Skipping permanently failed element: ${signature.substring(0, 60)}`);
+      return false;
+    }
     
-    await this.interactor.captureBaselineState();
+    // Mark as processed regardless of outcome to avoid reprocessing
+    this.processedElementSignatures.add(signature);
     
-    console.log(`   ✅ Page refreshed and baseline state recaptured`);
+    console.log(`   📍 Element ${elementIndex + 1}/${totalElements}: ${element.type} - "${(element.text || '').substring(0, 50)}"`);
+    
+    // Ensure we're in the baseline state before interaction
+    if (this.interactor.baselineState && this.totalInteractions > 0) {
+      console.log(`   🔄 Restoring to baseline state before interaction...`);
+      const restoreSuccess = await this.interactor.restoreToBaselineState();
+      if (!restoreSuccess) {
+        console.log(`   ⚠️ Failed to restore baseline state, attempting page refresh...`);
+        await this._refreshAndRediscoverBaseline();
+      }
+      await this.page.waitForTimeout(500); // Brief pause for stability
+    }
+    
+    // Attempt the interaction
+    const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
+    
+    if (interactionResult && interactionResult.success) {
+      console.log(`   ✅ Interaction successful`);
+      this.totalInteractions++;
+      return true;
+    } else {
+      console.log(`   ❌ Initial interaction failed, attempting recovery...`);
+      return await this._handleFailedElement(element, elementIndex);
+    }
   }
 
   async captureInteractiveContent() {
-    console.log('🚀 Starting interactive content capture...');
+    console.log('🚀 Starting enhanced interactive content capture...');
+    
     try {
+      // Initialize environment
       await this.env.init();
       this.currentPageDomain = this.env.currentDomain;
 
+      // Wait for complete page load
+      console.log('⏳ Waiting for complete page load...');
       await this.waits.waitForCompletePageLoadWithValidation();
 
+      // Handle cookie consent and overlays BEFORE taking screenshots or discovery
+      console.log('🍪 Handling cookie consent and overlays...');
+      await this._handleCookieConsentAndOverlays();
+
+      // Take baseline screenshot
+      console.log('📸 Taking baseline screenshot...');
       await this.screenshotter.takeScreenshotWithQualityCheck('00_baseline');
 
+      // Capture initial baseline state
+      console.log('📄 Capturing baseline state...');
       await this.interactor.captureBaselineState();
 
-      console.log(`\n🔄 Starting a single discovery and interaction round...`);
+      console.log(`\n🔄 Starting discovery and interaction phase...`);
+      console.log(`📊 Limits: ${this.options.maxInteractions} interactions, ${this.options.maxScreenshots} screenshots`);
 
+      // Discover interactive elements
       const newElements = await this._discoverNewElements();
       
       if (newElements.length > 0) {
@@ -113,6 +333,9 @@ class InteractiveContentCapture {
 
         console.log(`   🎯 Processing ${elementsToProcess} elements`);
 
+        let successfulInteractions = 0;
+        let failedInteractions = 0;
+
         for (let i = 0; i < elementsToProcess; i++) {
           if (!this._shouldContinueProcessing()) {
             console.log(`   🛑 Stopping: reached interaction or screenshot limit.`);
@@ -120,89 +343,93 @@ class InteractiveContentCapture {
           }
 
           const element = newElements[i];
-          const signature = this._createElementSignature(element);
+          const success = await this._processElement(element, i, elementsToProcess);
           
-          this.processedElementSignatures.add(signature);
+          if (success) {
+            successfulInteractions++;
+          } else {
+            failedInteractions++;
+          }
           
-          console.log(`   📍 Element ${i + 1}/${elementsToProcess}: ${element.type} - "${element.text}"`);
-          
-          if (this.interactor.baselineState && this.totalInteractions > 0) {
-            await this.interactor.restoreToBaselineState();
+          // Brief pause between elements to ensure stability
+          if (i < elementsToProcess - 1) {
             await this.page.waitForTimeout(300);
           }
-          
-          const interactionResult = await this.interactor.interactWithElement(element, this.totalInteractions);
-          
-          if (interactionResult && interactionResult.success) {
-            this.totalInteractions++;
-          } else {
-            const signature = this._createElementSignature(element);
-            if (!this.failedElements.has(signature)) {
-              console.log(`   🔄 Element not found, refreshing page and retrying...`);
-              this.failedElements.add(signature);
-              
-              await this._refreshAndRediscoverBaseline();
-              
-              const retryResult = await this.interactor.interactWithElement(element, this.totalInteractions);
-              
-              if (retryResult && retryResult.success) {
-                console.log(`   ✅ Retry successful after page refresh`);
-                this.totalInteractions++;
-              } else {
-                console.log(`   ❌ Retry also failed, skipping element`);
-              }
-            } else {
-              console.log(`   ❌ Element already failed before, skipping`);
-            }
-          }
         }
+        
+        console.log(`\n📊 Interaction Summary:`);
+        console.log(`   ✅ Successful: ${successfulInteractions}`);
+        console.log(`   ❌ Failed: ${failedInteractions}`);
+        console.log(`   📸 Screenshots taken: ${this.screenshotter.screenshots.length}`);
+        
       } else {
-        console.log("   ⚠️ No interactive elements found in the single discovery round.");
+        console.log("   ⚠️ No new interactive elements found in the discovery phase.");
       }
 
-      console.log(`\n🏁 Interaction round complete.`);
+      // Take final screenshot
+      console.log('📸 Taking final screenshot...');
+      await this.screenshotter.takeScreenshotWithQualityCheck('99_final');
+
+      console.log(`\n🏁 Interaction phase complete.`);
       console.log(`   📊 Total interactions: ${this.totalInteractions}`);
       console.log(`   📸 Total screenshots before deduplication: ${this.screenshotter.screenshots.length}`);
       console.log(`   🔍 Unique elements processed: ${this.processedElementSignatures.size}`);
 
-      if (this.screenshotter.screenshots.length < 3) {
-        await this.screenshotter.takeScreenshotWithQualityCheck('99_final');
+      // Handle screenshot deduplication
+      if (this.screenshotter.screenshots.length > 1) {
+        console.log('🔍 Starting screenshot deduplication...');
+        const { ImageDeduplicationService } = require('../../image-deduplication');
+        const dedup = new ImageDeduplicationService({
+          similarityThreshold: 95,
+          keepHighestQuality: true,
+          preserveFirst: true,
+          verbose: true
+        });
+        const uniqueScreenshots = await dedup.processScreenshots(this.screenshotter.screenshots);
+        this.deduplicationReport = dedup.getDeduplicationReport();
+        this.screenshotter.screenshots = uniqueScreenshots;
       }
 
-      const { ImageDeduplicationService } = require('../../image-deduplication');
-      const dedup = new ImageDeduplicationService({
-        similarityThreshold: this.options.dedupeSimilarityThreshold,
-        keepHighestQuality: true,
-        preserveFirst: true,
-        verbose: true
-      });
-      const uniqueScreenshots = await dedup.processScreenshots(this.screenshotter.screenshots);
-      this.deduplicationReport = dedup.getDeduplicationReport();
+      // Compile results
+      const results = {
+        success: true,
+        totalInteractions: this.totalInteractions,
+        screenshots: this.screenshotter.screenshots,
+        processedElements: this.processedElementSignatures.size,
+        failedElements: this.failedElements.size,
+        discoveredElements: this.discoveredElements.length,
+        interactionHistory: Array.from(this.interactionHistory.entries()),
+        deduplicationReport: this.deduplicationReport
+      };
 
-      this.screenshots = uniqueScreenshots;
-      
-      this._syncScreenshots();
-      
-      return this.screenshots;
+      console.log('✅ Enhanced interactive content capture completed successfully');
+      return results;
 
     } catch (error) {
-      console.error('❌ Interactive content capture failed:', error);
-      this._syncScreenshots();
+      console.error('❌ Error during interactive content capture:', error);
+      
+      // Try to take an error screenshot if possible
+      try {
+        await this.screenshotter.takeScreenshotWithQualityCheck('error_state', { force: true });
+      } catch (screenshotError) {
+        console.error('❌ Could not take error screenshot:', screenshotError.message);
+      }
+      
       throw error;
     }
   }
 
+  // Add the missing getCaptureReport method
   getCaptureReport() {
     return {
       totalInteractions: this.totalInteractions,
-      totalScreenshots: this.screenshots.length,
+      totalScreenshots: this.screenshotter.screenshots.length,
       uniqueElementsProcessed: this.processedElementSignatures.size,
+      failedElements: this.failedElements.size,
+      discoveredElements: this.discoveredElements.length,
       deduplicationReport: this.deduplicationReport,
+      interactionHistory: Array.from(this.interactionHistory.entries())
     };
-  }
-
-  _syncScreenshots() {
-    this.screenshots = [...this.screenshotter.screenshots];
   }
 }
 
