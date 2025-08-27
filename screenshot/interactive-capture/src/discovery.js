@@ -1,3 +1,4 @@
+// aldo-g/vuxi-capture/vuxi-capture-37d1b686a0441eea729434faac648f100bc235e1/screenshot/interactive-capture/src/discovery.js
 'use strict';
 
 class ElementDiscovery {
@@ -389,28 +390,12 @@ class ElementDiscovery {
           selectors: ['[data-toggle="modal"]:not([disabled])','[data-modal]:not([disabled])','.modal-trigger:not([disabled])'], 
           get: () => 'modal-trigger' 
         },
+        // NEW: Generic interactive div category
         {
-          name: 'hover-and-click',
-          priority: 72,
-          selectors: [
-            '.overlay',
-            '.member', 
-            '.card', 
-            '.team-member', 
-            '.hover-card', 
-            '[data-hover-interactive]'
-          ],
-          get: el => 'hover-and-click'
-        },
-        {
-          name: 'interactive-container',
-          priority: 65,
-          selectors: [
-            'div[onclick]',
-            'div[role="button"]',
-            'div.interactive'
-          ],
-          get: () => 'interactive-container'
+          name: 'generic-interactive-div',
+          priority: 68,
+          selectors: ['div[onclick]', 'div[role="button"]', 'div.interactive', 'div.clickable', 'div.member'],
+          get: () => 'generic-interactive-div'
         },
         { 
           name: 'interactive-generic', 

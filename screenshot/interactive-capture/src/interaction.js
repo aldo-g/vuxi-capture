@@ -1,3 +1,4 @@
+// aldo-g/vuxi-capture/vuxi-capture-37d1b686a0441eea729434faac648f100bc235e1/screenshot/interactive-capture/src/interaction.js
 'use strict';
 
 class InteractionEngine {
@@ -172,6 +173,9 @@ Navigating back.`);
   }
 
   async interactWithElement(elementData, index) {
+    if (elementData.type === 'state-change-container') {
+      return this.handleStateChangeInteraction(elementData, index);
+    }
     try {
       if (elementData.type === 'hover-and-click' || elementData.type === 'interactive-container') {
         console.log(`✨ Performing hover and click interaction...`);
@@ -492,6 +496,57 @@ Navigating back.`);
       console.error(`❌ Error interacting with element ${index + 1}:`, error.message);
       await this.page.goto(this.baselineState.url, { waitUntil: 'networkidle' });
       await this.reapplyElementIdentifiers();
+      return null;
+    }
+  }
+
+  async handleStateChangeInteraction(elementData, index) {
+    try {
+      console.log(`✨ Performing state-change interaction on: ${elementData.selector}`);
+
+      // 1. Get the initial class list
+      const initialClasses = await this.page.evaluate(selector => {
+        const el = document.querySelector(selector);
+        return el ? el.className : null;
+      }, elementData.selector);
+
+      if (initialClasses === null) {
+        console.log(`   ❌ Element not found before click: ${elementData.selector}`);
+        return null;
+      }
+
+      // 2. Click the element
+      await this.page.click(elementData.selector);
+      await this.page.waitForTimeout(this.options.interactionDelay);
+
+      // 3. Get the new class list
+      const newClasses = await this.page.evaluate(selector => {
+        const el = document.querySelector(selector);
+        return el ? el.className : null;
+      }, elementData.selector);
+
+      // 4. Compare class lists
+      if (newClasses !== initialClasses) {
+        console.log(`   ✅ State change detected: "${initialClasses}" -> "${newClasses}"`);
+        const safeLabel = (elementData.text || 'state_change').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+        await this.screenshotter.takeScreenshotWithQualityCheck(`interaction_${index + 1}_${safeLabel}`, {
+          force: true,
+          tags: ['state-change']
+        });
+
+        // Click again to attempt to revert the state
+        await this.page.click(elementData.selector);
+        await this.page.waitForTimeout(this.options.interactionDelay);
+      } else {
+        console.log(`   ℹ️  No state change detected after click.`);
+      }
+
+      await this.restoreToBaselineState();
+      return { success: true, navigated: false };
+
+    } catch (e) {
+      console.log(`   ❌ State-change interaction failed: ${e.message}`);
+      await this.restoreToBaselineState();
       return null;
     }
   }
