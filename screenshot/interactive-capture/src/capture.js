@@ -5,8 +5,6 @@ const { EnvironmentGuard } = require('./env');
 const { PageValidator } = require('./validator');
 const { PageWaits } = require('./waits');
 const { ElementDiscovery } = require('./discovery');
-const { ChangeDetector } = require('./changes');
-const { RegionLocator } = require('./regions');
 const { Screenshotter } = require('./screenshotter');
 const { InteractionEngine } = require('./interaction');
 
@@ -30,16 +28,12 @@ class InteractiveContentCapture {
     this.env = new EnvironmentGuard(this.page);
     this.validator = new PageValidator(this.page, this.options);
     this.waits = new PageWaits(this.page, this.validator);
-    this.changeDetector = new ChangeDetector(this.page, this.options);
-    this.regionLocator = new RegionLocator(this.page, this.options);
     this.screenshotter = new Screenshotter(this.page, this.options, this.validator);
     this.interactor = new InteractionEngine({
       page: this.page,
       options: this.options,
       env: this.env,
       waits: this.waits,
-      changes: this.changeDetector,
-      regions: this.regionLocator,
       screenshotter: this.screenshotter,
       interactionHistoryRef: this.interactionHistory
     });
@@ -374,21 +368,6 @@ class InteractiveContentCapture {
       console.log(`   📊 Total interactions: ${this.totalInteractions}`);
       console.log(`   📸 Total screenshots before deduplication: ${this.screenshotter.screenshots.length}`);
       console.log(`   🔍 Unique elements processed: ${this.processedElementSignatures.size}`);
-
-      // Handle screenshot deduplication
-      if (this.screenshotter.screenshots.length > 1) {
-        console.log('🔍 Starting screenshot deduplication...');
-        const { ImageDeduplicationService } = require('../../image-deduplication');
-        const dedup = new ImageDeduplicationService({
-          similarityThreshold: 95,
-          keepHighestQuality: true,
-          preserveFirst: true,
-          verbose: true
-        });
-        const uniqueScreenshots = await dedup.processScreenshots(this.screenshotter.screenshots);
-        this.deduplicationReport = dedup.getDeduplicationReport();
-        this.screenshotter.screenshots = uniqueScreenshots;
-      }
 
       // Compile results
       const results = {
