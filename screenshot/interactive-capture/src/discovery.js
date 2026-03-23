@@ -13,7 +13,74 @@ class ElementDiscovery {
     
     const elements = await this.page.evaluate((args) => {
       const { options, currentDomain } = args;
-      const out = [], seen = new Set();
+      const out = [];
+      
+      const INTERACTIVE_KEYWORDS = ['card','member','team','profile','person','employee','tile','panel','flip','reveal'];
+      const OVERLAY_KEYWORDS = ['overlay','detail','quote','bio','tooltip','drawer','popover','info','more','content'];
+      const OVERLAY_SELECTOR = OVERLAY_KEYWORDS.map(keyword => `[class*="${keyword}"]`).join(',');
+      const MAX_REVEAL_SCAN = 1500;
+      const MAX_CHILD_INSPECTION = 80;
+      
+      const markRevealCandidates = () => {
+        const candidates = document.querySelectorAll('[class]');
+        let inspected = 0;
+        
+        for (const el of candidates) {
+          if (inspected >= MAX_REVEAL_SCAN) break;
+          inspected++;
+          
+          if (el.children.length === 0) continue;
+          if (el.hasAttribute('data-vuxi-reveal-card')) continue;
+          
+          const style = getComputedStyle(el);
+          const hasPointerCursor = style.cursor === 'pointer';
+          const hasTabIndex = el.hasAttribute('tabindex') && el.getAttribute('tabindex') !== '-1';
+          const role = (el.getAttribute('role') || '').toLowerCase();
+          const hasRoleButton = role === 'button' || role === 'link';
+          const hasExplicitHandler = typeof el.onclick === 'function' || !!el.getAttribute('onclick');
+          const hasActionData = Array.from(el.attributes).some(attr => 
+            attr.name.startsWith('data-') && /toggle|card|member|profile|panel|team|tab|hover|reveal/i.test(attr.name + attr.value)
+          );
+          const className = (el.className || '').toString().toLowerCase();
+          const hasInteractiveKeyword = INTERACTIVE_KEYWORDS.some(keyword => className.includes(keyword));
+          
+          const isLikelyClickable = hasPointerCursor || hasTabIndex || hasRoleButton || hasExplicitHandler || hasActionData || hasInteractiveKeyword;
+          if (!isLikelyClickable) continue;
+          
+          let hiddenContentFound = false;
+          const childList = el.querySelectorAll('*');
+          for (let i = 0; i < childList.length && i < MAX_CHILD_INSPECTION; i++) {
+            const child = childList[i];
+            const text = (child.textContent || '').trim();
+            if (!text || text.length < 3) continue;
+            const cs = getComputedStyle(child);
+            if (cs.opacity === '0' || cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.maxHeight || '0') === 0) {
+              hiddenContentFound = true;
+              break;
+            }
+          }
+          
+          let overlayDescendant = null;
+          if (OVERLAY_SELECTOR) {
+            try {
+              overlayDescendant = el.querySelector(OVERLAY_SELECTOR);
+            } catch (e) {
+              overlayDescendant = null;
+            }
+          }
+          
+          if (!hiddenContentFound && !overlayDescendant) continue;
+          
+          el.setAttribute('data-vuxi-reveal-card', 'true');
+          const labelSource = el.querySelector('[data-name], .name, .title, .heading, h2, h3, h4, h5') || el;
+          const labelText = (labelSource.textContent || el.getAttribute('aria-label') || '').trim();
+          if (labelText) {
+            el.setAttribute('data-vuxi-reveal-label', labelText.substring(0, 80));
+          }
+        }
+      };
+      
+      markRevealCandidates();
       
       // Enhanced selector generation with better reliability
       const getSelector = (el) => {
@@ -278,6 +345,10 @@ class ElementDiscovery {
           return true;
         }
         
+        if (el.hasAttribute('data-vuxi-reveal-card')) {
+          return false;
+        }
+        
         if (!options.skipSocialElements) return false;
         
         // Skip elements that are too small to be meaningful
@@ -390,11 +461,20 @@ class ElementDiscovery {
           selectors: ['[data-toggle="modal"]:not([disabled])','[data-modal]:not([disabled])','.modal-trigger:not([disabled])'], 
           get: () => 'modal-trigger' 
         },
+        {
+          name: 'hover-and-click',
+          priority: 72,
+          selectors: ['[data-vuxi-reveal-card="true"]'],
+          get: el => {
+            const label = (el.getAttribute('data-vuxi-reveal-label') || '').trim();
+            return label ? `reveal:${label.replace(/\s+/g, '_').substring(0, 20)}` : 'reveal-card';
+          }
+        },
         // NEW: Generic interactive div category
         {
           name: 'generic-interactive-div',
           priority: 68,
-          selectors: ['div[onclick]', 'div[role="button"]', 'div.interactive', 'div.clickable', 'div.member'],
+          selectors: ['div[onclick]', 'div[role="button"]', 'div.interactive', 'div.clickable'],
           get: () => 'generic-interactive-div'
         },
         { 
