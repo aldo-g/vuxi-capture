@@ -86,6 +86,108 @@ class URLCrawler {
     }
   }
 
+  async discoverSpaRoutes(page, baseUrl) {
+    const domainCheckUrl = this.actualBaseUrl || baseUrl;
+    const discoveredRoutes = [];
+    const urlBefore = page.url();
+
+    // Snapshot element metadata upfront — text + bounding box for re-identification
+    const selector = [
+      'button:not([type="submit"]):not([type="reset"])',
+      '[role="button"]',
+      '[role="link"]',
+      '[onclick]',
+      '[data-href]',
+      '[data-url]',
+      '[data-route]',
+    ].join(',');
+
+    // Snapshot all element identifiers from a clean page load
+    // We use innerText + index as identity since we reload before each click
+    let elementTexts = [];
+    try {
+      elementTexts = await page.evaluate((sel) => {
+        return Array.from(document.querySelectorAll(sel))
+          .filter(el => {
+            if (el.closest('a[href]')) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            return el.offsetWidth > 0 && el.offsetHeight > 0;
+          })
+          .map((el, i) => ({ i, text: el.innerText?.trim().substring(0, 80) || '' }));
+      }, selector);
+    } catch {
+      return discoveredRoutes;
+    }
+
+    for (const { i, text } of elementTexts) {
+      try {
+        // Always reload to get a clean page state before each click
+        await page.goto(urlBefore, { waitUntil: 'networkidle', timeout: this.timeout });
+        await page.waitForTimeout(300);
+
+        // Re-find the element by its position among filtered elements
+        const handle = await page.evaluateHandle(({ sel, idx }) => {
+          const els = Array.from(document.querySelectorAll(sel)).filter(el => {
+            if (el.closest('a[href]')) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            return el.offsetWidth > 0 && el.offsetHeight > 0;
+          });
+          return els[idx] || null;
+        }, { sel: selector, idx: i });
+
+        const el = handle.asElement();
+        if (!el) continue;
+
+        await el.scrollIntoViewIfNeeded();
+        await el.click();
+        await page.waitForTimeout(800);
+
+        const urlAfter = page.url();
+
+        if (urlAfter !== urlBefore) {
+          const normalized = normalizeUrl(urlAfter);
+          if (
+            isValidUrl(normalized) &&
+            isSameDomain(domainCheckUrl, normalized) &&
+            !shouldExcludeUrl(normalized, this.excludePatterns) &&
+            !this.discoveredUrls.has(normalized)
+          ) {
+            const dedupKey = createDeduplicationKey(normalized);
+            if (!this.deduplicationKeys.has(dedupKey)) {
+              // Verify the URL is directly loadable (not state-gated — would redirect away)
+              const verifyPage = await page.context().newPage();
+              let directlyLoadable = false;
+              try {
+                await verifyPage.goto(normalized, { waitUntil: 'networkidle', timeout: this.timeout });
+                const landedUrl = normalizeUrl(verifyPage.url());
+                directlyLoadable = landedUrl === normalized;
+              } catch {
+                // If it errors, treat as not loadable
+              } finally {
+                await verifyPage.close();
+              }
+
+              if (directlyLoadable) {
+                discoveredRoutes.push(normalized);
+                this.discoveredUrls.add(normalized);
+                this.deduplicationKeys.add(dedupKey);
+                console.log(`  🖱️  Click on "${text.substring(0, 50) || 'element'}" revealed: ${normalized}`);
+              } else {
+                console.log(`  ⚠️  Skipping state-gated route (redirects when loaded directly): ${normalized}`);
+              }
+            }
+          }
+        }
+      } catch {
+        // Skip elements that fail
+      }
+    }
+
+    return discoveredRoutes;
+  }
+
   async crawlPage(browser, url, pageIndex) {
     let page = null;
     try {
@@ -105,7 +207,7 @@ class URLCrawler {
       }
 
       const response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
+        waitUntil: 'networkidle',
         timeout: this.timeout
       });
 
@@ -139,9 +241,20 @@ class URLCrawler {
 
       const links = await this.extractLinks(page, url);
 
-      console.log(`  📄 ${url}: found ${links.length} new links`);
+      // SPA discovery needs a clean page without the fastMode route interceptor
+      // (the interceptor blocks navigation triggered by JS clicks)
+      const spaPage = await browser.newPage();
+      let spaRoutes = [];
+      try {
+        await spaPage.goto(url, { waitUntil: 'networkidle', timeout: this.timeout });
+        spaRoutes = await this.discoverSpaRoutes(spaPage, url);
+      } finally {
+        await spaPage.close();
+      }
 
-      return links;
+      console.log(`  📄 ${url}: found ${links.length} new links, ${spaRoutes.length} SPA routes`);
+
+      return [...links, ...spaRoutes];
 
     } catch (error) {
       console.log(`  ❌ ${url}: ${error.message}`);
