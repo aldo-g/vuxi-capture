@@ -248,8 +248,11 @@ app.get('/api/jobs', (req, res) => {
   res.json(jobList);
 });
 
-// Serve static files (screenshots, reports)
-app.use('/data', express.static(path.join(__dirname, 'data')));
+// Serve static files (screenshots, reports) with CORS headers so browser <img> tags work
+app.use('/data', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+}, express.static(path.join(__dirname, 'data')));
 
 // MODIFIED: Process a job with URL review support
 async function processJob(jobId) {
@@ -494,13 +497,7 @@ async function proceedWithScreenshots(jobId, urlResult) {
     }
   };
   
-  const completionMessage = job.options.captureInteractive ? 
-    `🎉 ENHANCED ANALYSIS COMPLETE! 
-    📸 Captured ${screenshotResult.stats?.totalScreenshots || 0} total screenshots from ${urlsToCapture.length} URLs
-    🎯 Found interactive content on ${screenshotResult.stats?.interactivePagesFound || 0} pages
-    ⚡ Average ${screenshotResult.stats?.averageScreenshotsPerPage || '1.0'} screenshots per page
-    🔍 Successfully discovered and interacted with tabs, expandable content, and hidden elements` :
-    `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlsToCapture.length} URLs`;
+  const completionMessage = `Analysis complete! Captured ${screenshotResult.successful.length} screenshots from ${urlsToCapture.length} URLs`;
   
   console.log(`✅ Job ${jobId.slice(0,8)} completed successfully`);
   console.log(`🎯 Interactive pages found: ${screenshotResult.stats?.interactivePagesFound || 0}/${screenshotResult.successful.length}`);
