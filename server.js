@@ -3,10 +3,17 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs-extra');
+require('dotenv').config();
+const { createClient } = require('@supabase/supabase-js');
 
 // Import enhanced services
 const { URLDiscoveryService } = require('./url-discovery');
 const { EnhancedScreenshotService } = require('./screenshot/enhanced-integration');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -412,6 +419,60 @@ function waitForEnter() {
   });
 }
 
+// Upload all captured screenshots to Supabase Storage
+async function uploadScreenshotsToSupabase(jobId, successful) {
+  console.log(`☁️  Uploading ${successful.length} screenshots to Supabase...`);
+  const results = [];
+
+  for (const entry of successful) {
+    const storagePath = `job_${jobId}/${entry.filename}`;
+    try {
+      const fileBuffer = await fs.readFile(entry.outputPath);
+      const { error } = await supabase.storage
+        .from('screenshots')
+        .upload(storagePath, fileBuffer, { contentType: 'image/png', upsert: true });
+
+      if (error) throw error;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('screenshots')
+        .getPublicUrl(storagePath);
+
+      results.push({ ...entry, storageUrl: publicUrl });
+      console.log(`☁️  Uploaded ${entry.filename}`);
+    } catch (err) {
+      console.error(`☁️  Failed to upload ${entry.filename}:`, err.message);
+      results.push({ ...entry, storageUrl: null });
+    }
+
+    // Upload interaction screenshots too
+    if (entry.interactions?.length) {
+      for (const interaction of entry.interactions) {
+        if (interaction.status !== 'captured' || !interaction.path) continue;
+        const interactionAbsPath = path.join(path.dirname(entry.outputPath), path.basename(interaction.path));
+        const interactionStoragePath = `job_${jobId}/${path.basename(interaction.path)}`;
+        try {
+          const fileBuffer = await fs.readFile(interactionAbsPath);
+          const { error } = await supabase.storage
+            .from('screenshots')
+            .upload(interactionStoragePath, fileBuffer, { contentType: 'image/png', upsert: true });
+          if (!error) {
+            const { data: { publicUrl } } = supabase.storage
+              .from('screenshots')
+              .getPublicUrl(interactionStoragePath);
+            interaction.storageUrl = publicUrl;
+          }
+        } catch (err) {
+          console.error(`☁️  Failed to upload interaction screenshot:`, err.message);
+        }
+      }
+    }
+  }
+
+  console.log(`☁️  Upload complete: ${results.filter(r => r.storageUrl).length}/${results.length} succeeded`);
+  return results;
+}
+
 // MODIFIED: Handle screenshot capture phase (simplified)
 async function proceedWithScreenshots(jobId, urlResult) {
   const job = jobs.get(jobId);
@@ -464,11 +525,14 @@ async function proceedWithScreenshots(jobId, urlResult) {
   if (!screenshotResult.success && screenshotResult.successful.length === 0) {
     throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
   }
-  
+
+  // Upload screenshots to Supabase Storage
+  const screenshotsWithUrls = await uploadScreenshotsToSupabase(jobId, screenshotResult.successful);
+
   // Job completed successfully
   const results = {
     urls: urlsToCapture,
-    screenshots: screenshotResult.successful,
+    screenshots: screenshotsWithUrls,
     stats: {
       urlDiscovery: job.urlDiscovery.stats,
       screenshots: screenshotResult.stats

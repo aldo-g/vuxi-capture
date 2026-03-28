@@ -9,6 +9,7 @@
     "test": "node tests/test-url-discovery.js && node tests/test-screenshot.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.100.1",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",

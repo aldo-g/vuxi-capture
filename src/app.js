@@ -49,6 +49,40 @@ app.get('/api/jobs', (req, res) => {
   res.json(jobs);
 });
 
+// Single-page recapture: captures just one URL into an existing job's output dir
+app.post('/api/capture/single', async (req, res) => {
+  const { url, jobId } = req.body || {};
+
+  if (!url || !jobId) {
+    return res.status(400).json({ error: 'url and jobId are required' });
+  }
+
+  const { ScreenshotService } = require('./services/screenshot');
+
+  const outputDir = path.join(process.cwd(), 'data', `job_${jobId}`);
+
+  try {
+    const service = new ScreenshotService({ outputDir, timeout: 15000 });
+    const result = await service.captureAll([url]);
+
+    if (!result.success || !result.successful.length) {
+      return res.status(500).json({ error: 'Capture failed', details: result.failed });
+    }
+
+    const captured = result.successful[0];
+    res.json({
+      url: captured.url,
+      filename: captured.filename,
+      path: captured.path,
+      timestamp: new Date().toISOString(),
+      interactions: captured.interactions || []
+    });
+  } catch (err) {
+    console.error('[capture/single] error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.use('/data', express.static(path.join(process.cwd(), 'data')));
 
 module.exports = { app, jobRunner, JOB_STATUS };
