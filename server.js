@@ -22,7 +22,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// In-memory job storage (replace with database in production)
+// In-memory cache — populated from DB on read, keeps running jobs in sync
 const jobs = new Map();
 
 // Job status constants
@@ -30,13 +30,114 @@ const JOB_STATUS = {
   PENDING: 'pending',
   RUNNING: 'running',
   URL_DISCOVERY: 'url_discovery',
-  URL_REVIEW_PENDING: 'url_review_pending',  // NEW STATUS
+  URL_REVIEW_PENDING: 'url_review_pending',
   SCREENSHOT_CAPTURE: 'screenshot_capture',
   COMPLETED: 'completed',
   FAILED: 'failed'
 };
 
-// Helper function to update job status
+// Persist a job record to the database (upsert)
+async function persistJob(job) {
+  const { error } = await supabase
+    .from('CaptureJob')
+    .upsert({
+      id: job.id,
+      baseUrl: job.baseUrl,
+      status: job.status,
+      progress: job.progress || null,
+      urlDiscovery: job.urlDiscovery || null,
+      results: job.results || null,
+      error: job.error || null,
+      errorType: job.errorType || null,
+      updatedAt: new Date().toISOString(),
+    }, { onConflict: 'id' });
+  if (error) console.error(`DB persist error for job ${job.id.slice(0, 8)}:`, error.message);
+}
+
+// Load a job from the database into the in-memory cache
+async function loadJob(jobId) {
+  const { data, error } = await supabase
+    .from('CaptureJob')
+    .select('*')
+    .eq('id', jobId)
+    .single();
+  if (error || !data) return null;
+  const job = {
+    id: data.id,
+    baseUrl: data.baseUrl,
+    status: data.status,
+    progress: data.progress,
+    urlDiscovery: data.urlDiscovery,
+    results: data.results,
+    error: data.error,
+    errorType: data.errorType,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt,
+    // options are not stored in DB — only used during active processing
+    options: {},
+  };
+  jobs.set(jobId, job);
+  return job;
+}
+
+// Classify raw error messages into user-facing error types
+function classifyError(errorMessage) {
+  if (!errorMessage) return 'unknown';
+  const msg = errorMessage.toLowerCase();
+
+  // Bot protection / access denied
+  if (
+    msg.includes('http 403') ||
+    msg.includes('http 401') ||
+    msg.includes('forbidden') ||
+    msg.includes('access denied') ||
+    msg.includes('blocked') ||
+    msg.includes('captcha') ||
+    msg.includes('cloudflare') ||
+    msg.includes('bot') ||
+    msg.includes('challenge')
+  ) return 'bot_protection';
+
+  // Site unreachable / DNS failure
+  if (
+    msg.includes('err_name_not_resolved') ||
+    msg.includes('getaddrinfo') ||
+    msg.includes('enotfound') ||
+    msg.includes('dns') ||
+    msg.includes('net::err_name') ||
+    msg.includes('failed to resolve')
+  ) return 'dns_error';
+
+  // Connection refused / server down
+  if (
+    msg.includes('econnrefused') ||
+    msg.includes('connection refused') ||
+    msg.includes('err_connection_refused') ||
+    msg.includes('http 502') ||
+    msg.includes('http 503') ||
+    msg.includes('http 504') ||
+    msg.includes('server error')
+  ) return 'connection_error';
+
+  // Timeout
+  if (
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('exceeded') ||
+    msg.includes('err_timed_out')
+  ) return 'timeout';
+
+  // No URLs found (could be JS-only SPA, bot protection without HTTP error, etc.)
+  if (
+    msg.includes('no urls discovered') ||
+    msg.includes('url discovery failed') ||
+    msg.includes('no urls were discovered')
+  ) return 'no_urls';
+
+  return 'unknown';
+}
+
+// Helper function to update job status (in-memory + DB)
 function updateJobStatus(jobId, status, updates = {}) {
   const job = jobs.get(jobId);
   if (job) {
@@ -44,6 +145,7 @@ function updateJobStatus(jobId, status, updates = {}) {
     job.updatedAt = new Date().toISOString();
     Object.assign(job, updates);
     jobs.set(jobId, job);
+    persistJob(job);
   }
 }
 
@@ -158,14 +260,16 @@ app.post('/api/capture', async (req, res) => {
     };
     
     jobs.set(jobId, job);
+    await persistJob(job);
     console.log(`✅ Job ${jobId.slice(0,8)} created for ${baseUrl} ${job.options.manualReview ? '(with manual review)' : ''}`);
-    
+
     // Start processing asynchronously with better error handling
     setImmediate(() => {
       processJob(jobId).catch(error => {
         console.error(`❌ Job ${jobId.slice(0,8)} failed:`, error);
         updateJobStatus(jobId, JOB_STATUS.FAILED, {
           error: error.message,
+          errorType: error.errorType || classifyError(error.message),
           progress: {
             stage: 'failed',
             percentage: 0,
@@ -187,10 +291,10 @@ app.post('/api/capture', async (req, res) => {
 // The manual review now happens interactively in the terminal
 
 // Get job status
-app.get('/api/capture/:jobId', (req, res) => {
+app.get('/api/capture/:jobId', async (req, res) => {
   const { jobId } = req.params;
-  const job = jobs.get(jobId);
-  
+  const job = jobs.get(jobId) || await loadJob(jobId);
+
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
   }
@@ -229,7 +333,8 @@ app.get('/api/capture/:jobId', (req, res) => {
       results: job.results
     }),
     ...(job.status === JOB_STATUS.FAILED && {
-      error: job.error
+      error: job.error,
+      errorType: job.errorType || 'unknown'
     })
   });
 });
@@ -309,11 +414,17 @@ async function processJob(jobId) {
     });
     
     if (!urlResult.success) {
-      throw new Error(`URL discovery failed: ${urlResult.error}`);
+      const err = new Error(`URL discovery failed: ${urlResult.error}`);
+      err.errorType = classifyError(urlResult.error);
+      throw err;
     }
-    
+
     if (!urlResult.urls || urlResult.urls.length === 0) {
-      throw new Error('No URLs discovered from the website');
+      // If the crawler errored on the very first page, it's likely bot protection
+      const hadHttpErrors = urlResult.stats?.errors > 0;
+      const err = new Error('No URLs discovered from the website');
+      err.errorType = hadHttpErrors ? 'bot_protection' : 'no_urls';
+      throw err;
     }
     
     // Store URL discovery results
@@ -393,6 +504,10 @@ async function processJob(jobId) {
     
   } catch (error) {
     console.error(`❌ Job ${jobId.slice(0,8)} failed:`, error);
+    // Preserve errorType if already classified, otherwise classify now
+    if (!error.errorType) {
+      error.errorType = classifyError(error.message);
+    }
     throw error;
   }
 }
@@ -522,8 +637,11 @@ async function proceedWithScreenshots(jobId, urlResult) {
     interactivePagesFound: screenshotResult.stats?.interactivePagesFound || 0
   });
   
-  if (!screenshotResult.success && screenshotResult.successful.length === 0) {
-    throw new Error(`Screenshot capture failed: ${screenshotResult.error}`);
+  if (!screenshotResult.success && (screenshotResult.successful?.length ?? 0) === 0) {
+    const reason = screenshotResult.error || 'all pages failed to load';
+    const err = new Error(`Screenshot capture failed: ${reason}`);
+    err.errorType = classifyError(reason);
+    throw err;
   }
 
   // Upload screenshots to Supabase Storage
