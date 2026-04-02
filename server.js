@@ -542,7 +542,7 @@ async function uploadScreenshotsToSupabase(jobId, successful) {
   for (const entry of successful) {
     const storagePath = `job_${jobId}/${entry.filename}`;
     try {
-      const fileBuffer = await fs.readFile(entry.outputPath);
+      const fileBuffer = entry.buffer || await fs.readFile(entry.outputPath);
       const { error } = await supabase.storage
         .from('screenshots')
         .upload(storagePath, fileBuffer, { contentType: 'image/png', upsert: true });

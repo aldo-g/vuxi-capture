@@ -264,8 +264,7 @@ class EnhancedScreenshotService {
       const duration = (Date.now() - startTime) / 1000;
       const totalScreenshots = uniqueScreenshots.length;
       
-      // Remove buffer before writing metadata
-      const finalSuccessful = uniqueScreenshots.map(({ buffer, filepath, ...rest }) => rest);
+      const finalSuccessful = uniqueScreenshots.map(({ filepath, ...rest }) => ({ ...rest, outputPath: filepath }));
 
       const metadata = {
         timestamp: new Date().toISOString(),
